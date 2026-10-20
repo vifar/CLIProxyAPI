@@ -130,6 +130,33 @@ func (c *SessionCache) GetAndRefresh(sessionID string) (string, bool) {
 	return entry.authID, true
 }
 
+// GetByPrefix returns every live auth ID bound under a key prefix. It is used to
+// observe bindings whose namespace carries a scope suffix, such as a mixed route
+// scoped by the canonical eligible provider set.
+func (c *SessionCache) GetByPrefix(prefix string) map[string]struct{} {
+	if c == nil || prefix == "" {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.ensureInitializedLocked()
+	now := time.Now()
+	found := make(map[string]struct{})
+	for key, entry := range c.entries {
+		if entry.authID == "" {
+			continue
+		}
+		if !strings.HasPrefix(key, prefix) {
+			continue
+		}
+		if !now.Before(entry.expiresAt) {
+			continue
+		}
+		found[entry.authID] = struct{}{}
+	}
+	return found
+}
+
 // Set binds a session to an auth ID with TTL refresh. Existing aliases for the
 // same logical session remain attached when the binding is refreshed or moved.
 func (c *SessionCache) Set(sessionID, authID string) {

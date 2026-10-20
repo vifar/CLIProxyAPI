@@ -410,6 +410,29 @@ func canonicalModelKey(model string) string {
 	return modelName
 }
 
+// sessionAffinityNamespace returns the affinity namespace for a request. On a
+// mixed-provider route the namespace carries the canonical eligible provider set, so
+// the binding scope changes when the set of eligible providers changes. A
+// single-provider route keeps its plain provider namespace.
+func sessionAffinityNamespace(provider string, metadata map[string]any) string {
+	provider = strings.TrimSpace(provider)
+	if provider != "mixed" {
+		return provider
+	}
+	if metadata == nil {
+		return provider
+	}
+	raw, ok := metadata[cliproxyexecutor.SessionAffinityProviderSetMetadataKey].(string)
+	if !ok {
+		return provider
+	}
+	scope := strings.TrimSpace(raw)
+	if scope == "" {
+		return provider
+	}
+	return provider + "[" + scope + "]"
+}
+
 func authWebsocketsEnabled(auth *Auth) bool {
 	if auth == nil {
 		return false
@@ -1194,7 +1217,11 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	fallbackAuths := highestPriorityAuths(available)
 
 	modelKey := canonicalModelKey(model)
-	cacheKey := provider + "::" + primaryID + "::" + modelKey
+	// The affinity namespace is scoped by the canonical eligible provider set on a
+	// mixed route, so enabling or disabling a provider creates a distinct binding
+	// scope and a binding can never target a provider outside the current set.
+	namespace := sessionAffinityNamespace(provider, opts.Metadata)
+	cacheKey := namespace + "::" + primaryID + "::" + modelKey
 	isFork := false
 	if opts.Metadata != nil {
 		if forkFlag, ok := opts.Metadata[cliproxyexecutor.IsForkMetadataKey].(bool); ok && forkFlag {
@@ -1204,7 +1231,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	isSubagent := !isFork && isSubagentSession(primaryID, fallbackID)
 	fallbackKey := ""
 	if fallbackID != "" && fallbackID != primaryID {
-		fallbackKey = provider + "::" + fallbackID + "::" + modelKey
+		fallbackKey = namespace + "::" + fallbackID + "::" + modelKey
 	}
 	bind := func(authID string) {
 		if fallbackKey != "" && !isSubagent && !isFork {
@@ -1612,6 +1639,20 @@ func (s *SessionAffinitySelector) LookupAffinity(provider, model, sessionID stri
 				foundAuths[authID] = struct{}{}
 			}
 		}
+		// A mixed-route binding is scoped by the canonical eligible provider set, so
+		// the key carries a scope suffix. Observe those bindings too.
+		if candProvider == "mixed" {
+			for _, cand := range candidates {
+				bounded := cliproxysession.BoundSessionIdentity(cand)
+				prefix := "mixed[" + "::" + bounded + "::" + modelKey
+				for authID := range s.cache.GetByPrefix(prefix) {
+					if authFilter != nil && !authFilter(authID) {
+						continue
+					}
+					foundAuths[authID] = struct{}{}
+				}
+			}
+		}
 	}
 
 	if s.matcher != nil {
@@ -1668,6 +1709,9 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 	if raw, ok := res.Options.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey].(string); ok && raw != "" {
 		ns = raw
 	}
+	// The namespace must match the one used during selection, so it carries the
+	// same provider-set scope.
+	ns = sessionAffinityNamespace(ns, res.Options.Metadata)
 	nsModel := canonicalModelKey(res.Model)
 	if raw, ok := res.Options.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey].(string); ok && raw != "" {
 		nsModel = canonicalModelKey(raw)

@@ -1682,6 +1682,27 @@ func canonicalSchedulingProvider(key string) string {
 	}
 }
 
+// canonicalProviderSetScope renders an eligible provider set as a stable scope
+// string for the session affinity namespace. The set is sorted so that two sets
+// that differ only in order share one scope.
+func canonicalProviderSetScope(providerSet map[string]struct{}) string {
+	if len(providerSet) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(providerSet))
+	for key := range providerSet {
+		if key == "" {
+			continue
+		}
+		keys = append(keys, key)
+	}
+	if len(keys) == 0 {
+		return ""
+	}
+	sort.Strings(keys)
+	return strings.Join(keys, ",")
+}
+
 func (m *Manager) executorLocked(provider string) (ProviderExecutor, bool) {
 	provider = strings.TrimSpace(provider)
 	if provider == "" {
@@ -2189,6 +2210,9 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 	if len(providerSet) == 0 {
 		return nil, nil, "", &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
+	// Scope the affinity binding to the canonical eligible provider set, so a
+	// binding created under one set is never reused under a different one.
+	opts.Metadata[cliproxyexecutor.SessionAffinityProviderSetMetadataKey] = canonicalProviderSetScope(providerSet)
 	pluginScheduler, schedulerAcross := m.snapshotPluginScheduler()
 
 	m.mu.RLock()
@@ -2337,6 +2361,9 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 	if len(eligibleProviders) == 0 {
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
+	// Scope the affinity binding to the canonical eligible provider set, so a
+	// binding created under one set is never reused under a different one.
+	opts.Metadata[cliproxyexecutor.SessionAffinityProviderSetMetadataKey] = canonicalProviderSetScope(seenProviders)
 	eligibility := authSelectionEligibilityForRequest(ctx, opts)
 	if strings.TrimSpace(model) != "" {
 		providerSet := make(map[string]struct{}, len(eligibleProviders))
