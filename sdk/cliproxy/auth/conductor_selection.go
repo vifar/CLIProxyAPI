@@ -439,6 +439,10 @@ func (m *Manager) SetSelector(selector Selector) {
 		return
 	}
 	m.selector = selector
+	// The mixed-provider selector is built once, here, so its rotation state
+	// survives across requests. Building it per selection would reset the
+	// provider cursor on every request and the providers would never alternate.
+	m.mixedSelector = newMixedSelectorFor(selector)
 	m.mu.Unlock()
 
 	if oldSelector != nil {
@@ -459,6 +463,23 @@ func (m *Manager) Selector() Selector {
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	return m.selector
+}
+
+// MixedSelector returns the selector a mixed-provider route uses.
+//
+// It is the provider-equal selector for the round-robin family, and the configured
+// selector itself for every other strategy. It is built once when the selector is
+// set, so the provider rotation state survives across requests.
+func (m *Manager) MixedSelector() Selector {
+	if m == nil {
+		return nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.mixedSelector != nil {
+		return m.mixedSelector
+	}
 	return m.selector
 }
 
@@ -2243,11 +2264,20 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		selectorCtx := selectorContextForAvailableAuths(ctx, selector, model)
 		selectorCtx = withSessionAffinityTransientAuthIDs(selectorCtx, transientAuthIDs)
 		// A mixed route must balance the eligible providers equally, so the
-		// selector that picks the credential is the provider-equal one. The
-		// session-affinity selector keeps its binding logic and only replaces its
-		// fallback.
-		mixedSelector := providerEqualSelectorFor(selector)
-		selected, errPick = mixedSelector.Pick(selectorCtx, "mixed", selectionArgForSelector(selector, model), opts, selectorAuths)
+		// selector that picks the credential is the manager's mixed selector. It
+		// is built once when the selector is set, so its rotation state survives
+		// across requests.
+		mixedSelector := m.MixedSelector()
+		if mixedSelector == nil {
+			mixedSelector = selector
+		}
+		// The route model scopes the provider cursor, so it is passed through even
+		// when the built-in selector selection argument is empty.
+		selectionModel := model
+		if argument := selectionArgForSelector(selector, model); argument != "" {
+			selectionModel = argument
+		}
+		selected, errPick = mixedSelector.Pick(selectorCtx, "mixed", selectionModel, opts, selectorAuths)
 		if errPick != nil {
 			if isBuiltInSelector(selector) {
 				errPick = restoreModelCooldownErrorModel(errPick, model)

@@ -99,7 +99,7 @@ func TestSessionAffinityFallbackBalancesProviders(t *testing.T) {
 	})
 	t.Cleanup(affinity.Stop)
 
-	mixed := providerEqualSelectorFor(affinity)
+	mixed := newMixedSelectorFor(affinity)
 
 	gotProviders := make([]string, 0, 8)
 	for i := 0; i < 8; i++ {
@@ -122,15 +122,15 @@ func TestSessionAffinityFallbackBalancesProviders(t *testing.T) {
 // TestProviderEqualSelectorForLeavesOtherStrategiesAlone asserts that only the
 // round-robin family is replaced. fill-first and weighted round robin keep their
 // own semantics.
-func TestProviderEqualSelectorForLeavesOtherStrategiesAlone(t *testing.T) {
+func TestNewMixedSelectorForLeavesOtherStrategiesAlone(t *testing.T) {
 	t.Parallel()
 
 	fillFirst := &FillFirstSelector{}
-	if got := providerEqualSelectorFor(fillFirst); got != fillFirst {
+	if got := newMixedSelectorFor(fillFirst); got != fillFirst {
 		t.Fatalf("fill-first was replaced: %T", got)
 	}
 	weighted := &WeightedRoundRobinSelector{}
-	if got := providerEqualSelectorFor(weighted); got != weighted {
+	if got := newMixedSelectorFor(weighted); got != weighted {
 		t.Fatalf("weighted round robin was replaced: %T", got)
 	}
 }

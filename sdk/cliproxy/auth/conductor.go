@@ -172,12 +172,16 @@ type Manager struct {
 	pendingCooldownStateStore CooldownStateStore
 	executors                 map[string]ProviderExecutor
 	selector                  Selector
-	hook                      Hook
-	resultPolicy              atomic.Pointer[resultPolicyHolder]
-	mu                        sync.RWMutex
-	selectorMu                sync.Mutex
-	configCooldownMu          sync.Mutex
-	syncSchedulerMu           sync.Mutex
+	// mixedSelector is the selector a mixed-provider route uses. It is built once
+	// when the selector is set, so its provider rotation state survives across
+	// requests.
+	mixedSelector    Selector
+	hook             Hook
+	resultPolicy     atomic.Pointer[resultPolicyHolder]
+	mu               sync.RWMutex
+	selectorMu       sync.Mutex
+	configCooldownMu sync.Mutex
+	syncSchedulerMu  sync.Mutex
 	// executionSeq stamps upstream dispatches with a monotonic sequence used
 	// to reject cooldown clears from executions dispatched before the cooldown.
 	executionSeq       atomic.Uint64
@@ -257,6 +261,7 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		authLoadGate:          semaphore.NewWeighted(math.MaxInt64),
 		executors:             make(map[string]ProviderExecutor),
 		selector:              selector,
+		mixedSelector:         newMixedSelectorFor(selector),
 		hook:                  hook,
 		auths:                 make(map[string]*Auth),
 		authEpochs:            make(map[string]uint64),

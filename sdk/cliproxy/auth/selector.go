@@ -1092,11 +1092,22 @@ func (s *SessionAffinitySelector) Trees() *cliproxysession.InMemorySessionTreeSt
 // mixed route with session affinity enabled would flatten every credential into
 // one ring, so a provider's share of the traffic would scale with its credential
 // count instead of being equal.
+//
+// Only a round-robin fallback is replaced. A weighted fallback keeps its own
+// semantics, because the affinity selector's positive-weight filtering depends on
+// it, and a fill-first fallback keeps its credential ordering.
+//
+// The copy shares the provider-equal selector with the manager, so the fallback
+// and the mixed selection path use one cursor scope and one rotation state.
 func (s *SessionAffinitySelector) withProviderEqualFallback() *SessionAffinitySelector {
 	if s == nil {
 		return nil
 	}
 	if _, ok := s.fallback.(*ProviderEqualSelector); ok {
+		return s
+	}
+	if _, ok := s.fallback.(*RoundRobinSelector); !ok {
+		// A weighted or fill-first fallback keeps its own semantics.
 		return s
 	}
 	copied := *s

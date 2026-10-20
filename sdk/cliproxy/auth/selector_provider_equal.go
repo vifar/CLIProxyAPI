@@ -121,16 +121,21 @@ func pickRoundRobinByID(available []*Auth) *Auth {
 	return available[0]
 }
 
-// providerEqualSelectorFor returns the selector a mixed-provider route must use.
+// newMixedSelectorFor builds the selector a mixed-provider route uses.
 //
 // A mixed route must balance the eligible providers equally, so the built-in
-// round-robin selector is replaced by the provider-equal one. The
-// session-affinity selector keeps its own cache and binding logic and only
-// replaces its fallback, so a bound session still keeps its credential.
+// round-robin selector is replaced by the provider-equal one.
 //
-// The provider-equal selector is shared through the affinity selector's fallback
-// and through the mixed selection path, so both use one cursor scope.
-func providerEqualSelectorFor(selector Selector) Selector {
+// Only the round-robin family is replaced. fill-first and weighted round robin
+// keep their own semantics: replacing a weighted fallback would also bypass the
+// session-affinity selector's positive-weight filtering, and replacing a
+// fill-first fallback would switch it from credential ordering to provider
+// ordering.
+//
+// The result is built once and kept for the lifetime of the configured selector.
+// Building it per request would reset the provider cursor every time, and the
+// providers would never alternate.
+func newMixedSelectorFor(selector Selector) Selector {
 	switch typed := selector.(type) {
 	case *SessionAffinitySelector:
 		return typed.withProviderEqualFallback()
