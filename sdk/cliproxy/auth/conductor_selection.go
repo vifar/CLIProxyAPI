@@ -2372,9 +2372,17 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 	}
 	if errPick != nil {
 		m.warnLogAuthUnavailable(ctx, eligibleProviders, model, opts, tried, errPick)
+		recordRoutingTransition(ctx, RoutingTransitionEvent{
+			Transition: RoutingTransitionNoEligibleProvider,
+			Model:      model,
+		})
 		return nil, nil, "", errPick
 	}
 	if selected == nil {
+		recordRoutingTransition(ctx, RoutingTransitionEvent{
+			Transition: RoutingTransitionNoEligibleProvider,
+			Model:      model,
+		})
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "selector returned no auth"}
 	}
 	executor, okExecutor := m.Executor(providerKey)

@@ -915,6 +915,14 @@ type SessionAffinitySelector struct {
 	matcher           *cliproxysession.MerklePrefixMatcher
 	subagentAffinity  bool
 	rebindOnQuotaOnly bool
+
+	// boundProviders remembers which provider a bound credential belongs to, so a
+	// routing transition can tell a credential reselection inside the same
+	// provider from a failover to another provider. The bound credential may have
+	// left the eligible set entirely, so the provider cannot always be recovered
+	// from the available candidates.
+	boundProvidersMu sync.Mutex
+	boundProviders   map[string]string
 }
 
 const (
@@ -923,6 +931,8 @@ const (
 	// SessionAffinityRebindOnQuota preserves the existing session binding across transient failures
 	// and only rebinds on quota, auth, model-support, or permanent unavailability.
 	SessionAffinityRebindOnQuota = "quota"
+	// maxBoundProviderEntries bounds the remembered bound-credential providers.
+	maxBoundProviderEntries = 4096
 )
 
 func normalizeSessionAffinityRebindOn(value string) string {
@@ -1206,11 +1216,19 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	if fallbackID != "" && fallbackID != primaryID {
 		fallbackKey = provider + "::" + fallbackID + "::" + modelKey
 	}
+	// The provider a session is bound to is remembered, so a later transition can
+	// tell a credential reselection inside the same provider from a failover to
+	// another provider. The bound credential may have left the eligible set
+	// entirely, so the provider cannot always be recovered from the available
+	// candidates.
 	bind := func(authID string) {
 		if fallbackKey != "" && !isSubagent && !isFork {
 			s.cache.SetAliases(authID, cacheKey, fallbackKey)
 		} else {
 			s.cache.Set(cacheKey, authID)
+		}
+		if providerKey := s.routingProviderKeyForAuthID(authID, availabilityCandidates); providerKey != "" {
+			s.rememberBoundProvider(authID, providerKey)
 		}
 	}
 
@@ -1219,6 +1237,12 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 			if auth.ID == cachedAuthID {
 				bind(auth.ID)
 				entry.Infof("session-affinity: cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
+				recordRoutingTransition(ctx, RoutingTransitionEvent{
+					Transition: RoutingTransitionBindingHit,
+					Model:      model,
+					Provider:   s.routingProviderKey(auth),
+					Session:    primaryID,
+				})
 				return auth, nil
 			}
 		}
@@ -1237,6 +1261,22 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		}
 		bind(auth.ID)
 		entry.Infof("session-affinity: cache hit but auth unavailable, reselected | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
+		// The bound credential was unavailable. When the replacement belongs to the
+		// same provider it is a credential reselection; when it belongs to another
+		// provider it is a provider failover and the binding was replaced.
+		previousProvider := s.boundProviderFor(cachedAuthID, availabilityCandidates)
+		newProvider := s.routingProviderKey(auth)
+		transition := RoutingTransitionCredentialReselected
+		if previousProvider != "" && newProvider != "" && previousProvider != newProvider {
+			transition = RoutingTransitionProviderFailover
+		}
+		recordRoutingTransition(ctx, RoutingTransitionEvent{
+			Transition:       transition,
+			Model:            model,
+			Provider:         newProvider,
+			PreviousProvider: previousProvider,
+			Session:          primaryID,
+		})
 		return auth, nil
 	}
 
@@ -1283,7 +1323,77 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	} else {
 		entry.Infof("session-affinity: cache miss, new binding | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
 	}
+	recordRoutingTransition(ctx, RoutingTransitionEvent{
+		Transition: RoutingTransitionBindingCreated,
+		Model:      model,
+		Provider:   s.routingProviderKey(auth),
+		Session:    primaryID,
+	})
 	return auth, nil
+}
+
+// routingProviderKey returns the provider key a selected auth belongs to.
+func (s *SessionAffinitySelector) routingProviderKey(auth *Auth) string {
+	if auth == nil {
+		return ""
+	}
+	return executorKeyFromAuth(auth)
+}
+
+// routingProviderKeyForAuthID returns the provider key of a bound auth, looked up
+// among the candidates. It returns an empty string when the bound auth is not in
+// the candidate set, which means the binding left the eligible set entirely.
+func (s *SessionAffinitySelector) routingProviderKeyForAuthID(authID string, candidates []*Auth) string {
+	if authID == "" {
+		return ""
+	}
+	for _, candidate := range candidates {
+		if candidate == nil {
+			continue
+		}
+		if candidate.ID == authID {
+			return executorKeyFromAuth(candidate)
+		}
+	}
+	return ""
+}
+
+// rememberBoundProvider records which provider a bound credential belongs to.
+//
+// The map is bounded: a client cannot make it grow without limit by cycling
+// through credentials.
+func (s *SessionAffinitySelector) rememberBoundProvider(authID, providerKey string) {
+	if s == nil || authID == "" || providerKey == "" {
+		return
+	}
+	s.boundProvidersMu.Lock()
+	defer s.boundProvidersMu.Unlock()
+	if s.boundProviders == nil {
+		s.boundProviders = make(map[string]string)
+	}
+	if len(s.boundProviders) >= maxBoundProviderEntries {
+		// Drop an arbitrary entry rather than grow without bound.
+		for key := range s.boundProviders {
+			delete(s.boundProviders, key)
+			break
+		}
+	}
+	s.boundProviders[authID] = providerKey
+}
+
+// boundProviderFor returns the remembered provider of a bound credential, falling
+// back to the candidate lookup.
+func (s *SessionAffinitySelector) boundProviderFor(authID string, candidates []*Auth) string {
+	if s == nil || authID == "" {
+		return ""
+	}
+	s.boundProvidersMu.Lock()
+	remembered := s.boundProviders[authID]
+	s.boundProvidersMu.Unlock()
+	if remembered != "" {
+		return remembered
+	}
+	return s.routingProviderKeyForAuthID(authID, candidates)
 }
 
 func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth, entry *log.Entry) (*Auth, bool, error) {
