@@ -1,0 +1,123 @@
+# The fork's own configuration.
+#
+# This file carries no credentials. Add the API keys for the providers you use, or
+# keep them in ~/.cli-proxy-api/ and let the provider entries below point at them.
+#
+# The provider rows and the live model list they support are documented in
+# docs/compatible-providers.md. A working copy with placeholder keys is in
+# examples/compatible-providers/config.yaml.
+
+port: 8318
+
+# Bind to localhost only. The management API is reachable over the tailnet only
+# when remote-management.allow-remote is turned on, which needs a secret key.
+host: 127.0.0.1
+
+auth-dir: "~/.cli-proxy-api"
+
+debug: false
+
+logging-to-file: false
+
+usage-statistics-enabled: true
+
+# Additional credential retry rounds after the first round exhausts its eligible
+# credentials.
+request-retry: 3
+
+# Session-sticky round robin.
+#
+# A session stays on the provider and credential it was bound to, so a multi-turn
+# conversation keeps its prompt cache warm. When several providers expose the same
+# model name, traffic is split equally between the providers first and then between
+# that provider's credentials, so a provider's share does not scale with its
+# credential count. The binding is scoped by the model and by the eligible provider
+# set, so turning a provider on or off gives new sessions their own scope.
+routing:
+  strategy: round-robin
+  session-affinity: true
+  session-affinity-ttl: "1h"
+
+quota-exceeded:
+  switch-project: true
+  switch-preview-model: true
+
+# The management API is disabled unless a secret key is set. Keep it on localhost.
+remote-management:
+  allow-remote: false
+  secret-key: ""
+
+# Models a provider must not serve, using upstream's native key. A "*" entry
+# excludes every model for that provider. The fork writes this key directly; it
+# does not use an inclusion list and invert it.
+oauth-excluded-models:
+  claude:
+    - "claude-haiku-4-5"
+    - "claude-haiku-4-5-20251001"
+  codex:
+    - "gpt-4o-mini"
+    - "gpt-4o-2024-05-13"
+    - "gpt-4o-2024-08-06"
+    - "gpt-4o-2024-11-20"
+    - "gpt-4-turbo"
+    - "gpt-4"
+    - "gpt-3.5-turbo"
+
+# OpenAI-compatible providers. Each entry's live model list is read in the
+# background and the models listed here are never removed. See
+# docs/compatible-providers.md.
+openai-compatibility:
+  # Ollama Cloud. The live model list needs an API key.
+  - name: ollama-cloud
+    base-url: https://ollama.com/v1
+    api-key-entries:
+      - api-key: "replace-with-your-ollama-cloud-key"
+    models:
+      # DeepSeek V4 Flash is the stable default alias.
+      - name: deepseek-v4.1-flash
+        alias: deepseek-v4.1-flash
+      - name: deepseek-v4-flash
+        alias: deepseek-v4-flash
+      - name: deepseek-v4-pro
+        alias: deepseek-v4-pro
+      # Kimi K3.
+      - name: kimi-k3
+        alias: kimi-k3
+      - name: kimi-k2.7-code
+        alias: kimi-k2.7-code
+      - name: glm-5.3
+        alias: glm-5.3
+      - name: glm-5.2
+        alias: glm-5.2
+      - name: minimax-m3
+        alias: minimax-m3
+
+  # OpenRouter. The live model list is public; a key is needed to route requests.
+  - name: openrouter
+    base-url: https://openrouter.ai/api/v1
+    api-key-entries:
+      - api-key: "replace-with-your-openrouter-key"
+    models:
+      - name: anthropic/claude-sonnet-4.5
+        alias: claude-sonnet-4.5
+      - name: anthropic/claude-opus-4.5
+        alias: claude-opus-4.5
+      - name: openai/gpt-4.1
+        alias: gpt-4.1
+      - name: google/gemini-2.5-flash
+        alias: gemini-2.5-flash
+      - name: deepseek/deepseek-r1
+        alias: deepseek-r1
+
+  # Vercel AI Gateway. The live model list is public.
+  - name: vercel
+    base-url: https://ai-gateway.vercel.sh/v1
+    api-key-entries:
+      - api-key: "replace-with-your-vercel-key"
+    models:
+      - name: anthropic/claude-sonnet-4.5
+        alias: claude-sonnet-4.5
+      - name: openai/gpt-4.1
+        alias: gpt-4.1
+      - name: deepseek/deepseek-v3.1
+        alias: deepseek-v3.1
