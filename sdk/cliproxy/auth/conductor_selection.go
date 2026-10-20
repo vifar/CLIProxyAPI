@@ -2242,7 +2242,12 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 	if !handled {
 		selectorCtx := selectorContextForAvailableAuths(ctx, selector, model)
 		selectorCtx = withSessionAffinityTransientAuthIDs(selectorCtx, transientAuthIDs)
-		selected, errPick = selector.Pick(selectorCtx, "mixed", selectionArgForSelector(selector, model), opts, selectorAuths)
+		// A mixed route must balance the eligible providers equally, so the
+		// selector that picks the credential is the provider-equal one. The
+		// session-affinity selector keeps its binding logic and only replaces its
+		// fallback.
+		mixedSelector := providerEqualSelectorFor(selector)
+		selected, errPick = mixedSelector.Pick(selectorCtx, "mixed", selectionArgForSelector(selector, model), opts, selectorAuths)
 		if errPick != nil {
 			if isBuiltInSelector(selector) {
 				errPick = restoreModelCooldownErrorModel(errPick, model)

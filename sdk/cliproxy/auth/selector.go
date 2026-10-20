@@ -1084,6 +1084,26 @@ func (s *SessionAffinitySelector) Trees() *cliproxysession.InMemorySessionTreeSt
 	return cliproxysession.NewInMemorySessionTreeStore(0, time.Hour)
 }
 
+// withProviderEqualFallback returns a copy of the selector whose fallback selects
+// providers equally.
+//
+// The affinity selector keeps its own cache and binding logic; only the fallback
+// that picks a credential for a cold or rebound session changes. Without this, a
+// mixed route with session affinity enabled would flatten every credential into
+// one ring, so a provider's share of the traffic would scale with its credential
+// count instead of being equal.
+func (s *SessionAffinitySelector) withProviderEqualFallback() *SessionAffinitySelector {
+	if s == nil {
+		return nil
+	}
+	if _, ok := s.fallback.(*ProviderEqualSelector); ok {
+		return s
+	}
+	copied := *s
+	copied.fallback = NewProviderEqualSelector()
+	return &copied
+}
+
 // Pick selects an auth with session affinity when possible.
 // Explicit Claude Code, Codex, OpenCode, pi, and request-body session signals
 // are absolute authority. Requests without those signals use the Merkle LCP

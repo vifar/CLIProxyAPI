@@ -2,7 +2,10 @@ package auth
 
 import (
 	"context"
+	"strconv"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -40,16 +43,23 @@ func newUnequalMixedProviderScheduler(t *testing.T) (scheduler *authScheduler, p
 func newMixedProviderFixture(t *testing.T) mixedProviderFixture {
 	t.Helper()
 
+	// The model registry is global, so the credential IDs must be unique per
+	// fixture invocation. A shared ID would let one test unregister a credential
+	// that another test still believes is registered, and the other test's
+	// scheduler would then snapshot a credential that appears to support no
+	// model. Unique IDs keep parallel tests independent.
+	unique := uniqueFixtureSuffix(t)
+
 	providerA := "openai-compatible-ollama-cloud"
 	providerB := "openai-compatible-opencode-go"
 	modelA := "deepseek-v4-pro"
 	modelB := "glm-5.3"
 
 	auths := []*Auth{
-		{ID: "ollama-cloud-1", Provider: providerA},
-		{ID: "opencode-go-1", Provider: providerB},
-		{ID: "opencode-go-2", Provider: providerB},
-		{ID: "opencode-go-3", Provider: providerB},
+		{ID: "ollama-cloud-1-" + unique, Provider: providerA},
+		{ID: "opencode-go-1-" + unique, Provider: providerB},
+		{ID: "opencode-go-2-" + unique, Provider: providerB},
+		{ID: "opencode-go-3-" + unique, Provider: providerB},
 	}
 
 	reg := registry.GetGlobalRegistry()
@@ -77,6 +87,13 @@ func newMixedProviderFixture(t *testing.T) mixedProviderFixture {
 		modelB:    modelB,
 		authIDs:   authIDs,
 	}
+}
+
+// uniqueFixtureSuffix returns a suffix that is unique per test invocation, so
+// parallel tests never share a global registry ID.
+func uniqueFixtureSuffix(t *testing.T) string {
+	t.Helper()
+	return strings.ToLower(strings.ReplaceAll(t.Name(), "/", "-")) + "-" + strconv.FormatInt(time.Now().UnixNano(), 36)
 }
 
 // TestAuthSchedulerPickMixedRoundRobinBalancesProvidersBeforeCredentials asserts that
@@ -193,16 +210,19 @@ func TestAuthSchedulerPickMixedRoundRobinCanonicalizesProviderSet(t *testing.T) 
 func TestAuthSchedulerPickMixedRoundRobinLowerPriorityProviderExcluded(t *testing.T) {
 	t.Parallel()
 
-	providerA := "provider-high"
-	providerB := "provider-low"
-	model := "model-1"
+	// Unique credential IDs keep this test independent of the other parallel
+	// tests sharing the global model registry.
+	unique := uniqueFixtureSuffix(t)
+	providerA := "provider-high-" + unique
+	providerB := "provider-low-" + unique
+	model := "model-1-" + unique
 
 	auths := []*Auth{
-		{ID: "high-1", Provider: providerA, Attributes: map[string]string{"priority": "10"}},
-		{ID: "low-1", Provider: providerB, Attributes: map[string]string{"priority": "0"}},
+		{ID: "high-1-" + unique, Provider: providerA, Attributes: map[string]string{"priority": "10"}},
+		{ID: "low-1-" + unique, Provider: providerB, Attributes: map[string]string{"priority": "0"}},
 	}
-	registerSchedulerModels(t, providerA, model, "high-1")
-	registerSchedulerModels(t, providerB, model, "low-1")
+	registerSchedulerModels(t, providerA, model, "high-1-"+unique)
+	registerSchedulerModels(t, providerB, model, "low-1-"+unique)
 
 	scheduler := newSchedulerForTest(&RoundRobinSelector{}, auths...)
 
@@ -220,5 +240,47 @@ func TestAuthSchedulerPickMixedRoundRobinLowerPriorityProviderExcluded(t *testin
 		if provider != providerA {
 			t.Fatalf("pick %d provider = %q, want %q (lower priority tier participated)", i, provider, providerA)
 		}
+	}
+}
+
+// TestAuthSchedulerPickMixedFillFirstKeepsRegistryProviderOrder asserts that
+// fill-first still selects the first provider in the order the caller supplied.
+//
+// The provider-equal rotation canonicalizes the provider set so two sets that
+// differ only in order share one cursor scope. fill-first must not see that
+// canonical order: it fills the first provider that has a ready credential, so
+// its result depends on the order the registry supplied.
+func TestAuthSchedulerPickMixedFillFirstKeepsRegistryProviderOrder(t *testing.T) {
+	t.Parallel()
+
+	unique := uniqueFixtureSuffix(t)
+	providerFirst := "provider-first-" + unique
+	providerSecond := "provider-second-" + unique
+	model := "fill-first-model-" + unique
+
+	auths := []*Auth{
+		{ID: "first-a-" + unique, Provider: providerFirst},
+		{ID: "first-b-" + unique, Provider: providerFirst},
+		{ID: "second-a-" + unique, Provider: providerSecond},
+	}
+	registerSchedulerModels(t, providerFirst, model, "first-a-"+unique, "first-b-"+unique)
+	registerSchedulerModels(t, providerSecond, model, "second-a-"+unique)
+
+	scheduler := newSchedulerForTest(&FillFirstSelector{}, auths...)
+
+	// The caller supplies the first provider first, so fill-first must use it,
+	// even though the canonical order sorts the other way.
+	picked, provider, err := scheduler.pickMixed(
+		context.Background(), []string{providerFirst, providerSecond}, model,
+		cliproxyexecutor.Options{}, nil,
+	)
+	if err != nil {
+		t.Fatalf("pickMixed: %v", err)
+	}
+	if picked == nil {
+		t.Fatal("pickMixed: nil auth")
+	}
+	if provider != providerFirst {
+		t.Fatalf("provider = %q, want %q (fill-first must keep the registry order)", provider, providerFirst)
 	}
 }

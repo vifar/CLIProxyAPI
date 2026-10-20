@@ -490,15 +490,13 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 	}
 
 	predicate := scheduledAuthPredicate(eligibility, tried, "", strategy == schedulerStrategyWeightedRoundRobin)
-	// The eligible provider set is canonicalized once, up front, so the provider
-	// ring, its cursor scope and the shard lookup all agree on one order. Two
-	// provider sets that differ only in order therefore share one scope.
-	canonicalProviders := canonicalProviderKeys(normalized)
-	candidateShards := make([]*modelScheduler, len(canonicalProviders))
+	// The shard lookup keeps the registry's provider order. fill-first depends on
+	// that order, so it must not see the canonical order below.
+	candidateShards := make([]*modelScheduler, len(normalized))
 	bestPriority := 0
 	hasCandidate := false
 	now := time.Now()
-	for providerIndex, providerKey := range canonicalProviders {
+	for providerIndex, providerKey := range normalized {
 		providerState := s.providers[providerKey]
 		if providerState == nil {
 			continue
@@ -522,7 +520,7 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 	}
 
 	if strategy == schedulerStrategyFillFirst {
-		for providerIndex, providerKey := range canonicalProviders {
+		for providerIndex, providerKey := range normalized {
 			shard := candidateShards[providerIndex]
 			if shard == nil {
 				continue
@@ -535,10 +533,24 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
 	}
 
+	// The eligible provider set is canonicalized for the round-robin ring, so the
+	// provider ring and its cursor scope agree on one order and two provider sets
+	// that differ only in order share one scope.
+	canonicalProviders := canonicalProviderKeys(normalized)
+	canonicalShards := make([]*modelScheduler, len(canonicalProviders))
+	for canonicalIndex, providerKey := range canonicalProviders {
+		for providerIndex, candidateKey := range normalized {
+			if candidateKey == providerKey {
+				canonicalShards[canonicalIndex] = candidateShards[providerIndex]
+				break
+			}
+		}
+	}
+
 	cursorKey := strings.Join(canonicalProviders, ",") + ":" + modelKey
 	if strategy == schedulerStrategyWeightedRoundRobin {
 		entries := make([]*scheduledAuth, 0)
-		for _, shard := range candidateShards {
+		for _, shard := range canonicalShards {
 			if shard == nil {
 				continue
 			}
@@ -575,7 +587,7 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 	// Provider-first mixed round robin: select the provider first, then select a
 	// credential only from that provider's shard for the canonical model. Provider
 	// share is equal and does not depend on how many credentials a provider owns.
-	candidates := collectMixedProviderCandidates(canonicalProviders, candidateShards, predicate)
+	candidates := collectMixedProviderCandidates(canonicalProviders, canonicalShards, predicate)
 	winning := candidatesAtHighestPriority(candidates)
 	if len(winning) == 0 {
 		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
