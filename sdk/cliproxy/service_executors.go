@@ -65,7 +65,7 @@ func newOpenAICompatibilityRegistrationCacheForConfig(cfg *config.Config) *openA
 		}
 		entry := &openAICompatibilityRegistrationEntry{
 			providerKey: util.OpenAICompatibleProviderKey(providerName),
-			models:      buildOpenAICompatibilityConfigModels(compat),
+			models:      applyExcludedModels(buildOpenAICompatibilityConfigModels(compat), compat.ExcludedModels),
 		}
 		cache.byIndex[i] = entry
 		if _, exists := cache.byName[key]; !exists {
