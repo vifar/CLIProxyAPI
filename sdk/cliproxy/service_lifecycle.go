@@ -428,4 +428,28 @@ func (s *Service) startModelCatalogUpdaters(ctx context.Context) {
 		proxyURL = cfg.ProxyURL
 	}
 	executor.StartXAIVersionUpdater(ctx, proxyURL)
+	s.startCompatCatalogUpdater(ctx)
+}
+
+// startCompatCatalogUpdater starts the live model list refresh for the configured
+// OpenAI-compatible providers.
+//
+// The first refresh runs in the background so a slow or unreachable provider never
+// delays the proxy becoming ready. The configured model list is used until a live
+// list arrives, so the proxy always serves the models the operator wrote down.
+func (s *Service) startCompatCatalogUpdater(ctx context.Context) {
+	if s == nil {
+		return
+	}
+	s.cfgMu.Lock()
+	if s.compatCatalog == nil {
+		s.compatCatalog = newCompatCatalogManager(s)
+	}
+	manager := s.compatCatalog
+	s.cfgMu.Unlock()
+
+	manager.Start(ctx)
+	go func() {
+		manager.Refresh(ctx)
+	}()
 }
