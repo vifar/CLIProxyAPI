@@ -1,0 +1,43 @@
+# no-mistakes repository settings (pushed-branch, non-executing fields only).
+#
+# This is a Go repository. The commands below are DETERMINISTIC: the test step runs
+# the full suite with a fixed package parallelism and a fixed count, and the lint
+# and typecheck steps pin the format check and the type check. A "Test passed" line
+# on this repository is therefore a statement about the whole suite, not about a
+# choice an agent made about which packages to run.
+#
+# -p 4 keeps one suite from taking the whole machine: the Studio runs several
+# pipelines at once and a Go build cache miss is CPU heavy.
+# -count=1 disables the test cache, so a run cannot report a pass it did not
+# recompute.
+#
+# The format check is scoped to the packages this repository ships, minus one file
+# that upstream main already leaves unformatted: internal/pluginhost/host.go carries
+# a pre-existing indentation fault on upstream main (verified: `gofmt -l .` on a
+# clean upstream checkout names that file and no other). A whole-repository format
+# gate would therefore fail on every branch, including one that changed nothing.
+# The type check below still covers every package, so the excluded file is still
+# compiled and vetted.
+#
+# "typecheck" is the step name the crew's root coverage check (bin/nm-roots) looks
+# for, so the type check is named explicitly rather than folded into lint. The
+# pipeline itself reads prepare, lint, test and format; the typecheck entry is
+# additive documentation of the same command, and the lint step runs it too, so the
+# type check is not optional on either reading.
+#
+# The review conversation is ON so the reviewer can ask the larger questions it
+# cannot settle itself instead of parking the gate on them. It is read only from
+# this default-branch copy, so a pushed branch cannot make its own review wait on
+# an answer.
+
+commands:
+  prepare: go mod download
+  test: go test -p 4 -count=1 ./...
+  typecheck: go vet ./... && go build -o /dev/null ./cmd/server
+  lint: gofmt -l sdk internal cmd test examples | grep -v '^internal/pluginhost/host.go$' | tee /dev/stderr | (! read) && go vet ./... && go build -o /dev/null ./cmd/server
+
+review:
+  conversation: true
+
+rebase:
+  strategy: merge
