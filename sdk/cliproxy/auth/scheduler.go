@@ -490,11 +490,15 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 	}
 
 	predicate := scheduledAuthPredicate(eligibility, tried, "", strategy == schedulerStrategyWeightedRoundRobin)
-	candidateShards := make([]*modelScheduler, len(normalized))
+	// The eligible provider set is canonicalized once, up front, so the provider
+	// ring, its cursor scope and the shard lookup all agree on one order. Two
+	// provider sets that differ only in order therefore share one scope.
+	canonicalProviders := canonicalProviderKeys(normalized)
+	candidateShards := make([]*modelScheduler, len(canonicalProviders))
 	bestPriority := 0
 	hasCandidate := false
 	now := time.Now()
-	for providerIndex, providerKey := range normalized {
+	for providerIndex, providerKey := range canonicalProviders {
 		providerState := s.providers[providerKey]
 		if providerState == nil {
 			continue
@@ -518,7 +522,7 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 	}
 
 	if strategy == schedulerStrategyFillFirst {
-		for providerIndex, providerKey := range normalized {
+		for providerIndex, providerKey := range canonicalProviders {
 			shard := candidateShards[providerIndex]
 			if shard == nil {
 				continue
@@ -531,7 +535,7 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
 	}
 
-	cursorKey := strings.Join(normalized, ",") + ":" + modelKey
+	cursorKey := strings.Join(canonicalProviders, ",") + ":" + modelKey
 	if strategy == schedulerStrategyWeightedRoundRobin {
 		entries := make([]*scheduledAuth, 0)
 		for _, shard := range candidateShards {
@@ -568,59 +572,100 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
 	}
 
-	weights := make([]int, len(normalized))
-	segmentStarts := make([]int, len(normalized))
-	segmentEnds := make([]int, len(normalized))
-	totalWeight := 0
-	for providerIndex, shard := range candidateShards {
-		segmentStarts[providerIndex] = totalWeight
-		if shard != nil {
-			weights[providerIndex] = shard.readyCountAtPriorityLocked(false, bestPriority, predicate)
-		}
-		totalWeight += weights[providerIndex]
-		segmentEnds[providerIndex] = totalWeight
-	}
-	if totalWeight == 0 {
+	// Provider-first mixed round robin: select the provider first, then select a
+	// credential only from that provider's shard for the canonical model. Provider
+	// share is equal and does not depend on how many credentials a provider owns.
+	candidates := collectMixedProviderCandidates(canonicalProviders, candidateShards, predicate)
+	winning := candidatesAtHighestPriority(candidates)
+	if len(winning) == 0 {
 		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
 	}
 
-	startSlot := s.mixedCursors[cursorKey] % totalWeight
-	startProviderIndex := -1
-	for providerIndex := range normalized {
-		if weights[providerIndex] == 0 {
-			continue
-		}
-		if startSlot < segmentEnds[providerIndex] {
-			startProviderIndex = providerIndex
-			break
-		}
-	}
-	if startProviderIndex < 0 {
-		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
+	// The cursor is scoped by the canonical model and the canonical eligible
+	// provider set, so provider rotation for one model never advances another
+	// model's cursor, and two provider sets that differ only in order share one
+	// scope.
+	start := s.mixedCursors[cursorKey] % len(winning)
+	if start < 0 {
+		start = 0
 	}
 
-	slot := startSlot
-	for offset := 0; offset < len(normalized); offset++ {
-		providerIndex := (startProviderIndex + offset) % len(normalized)
-		if weights[providerIndex] == 0 {
+	for offset := 0; offset < len(winning); offset++ {
+		candidate := winning[(start+offset)%len(winning)]
+		picked := candidate.shard.pickReadyAtPriorityLocked(
+			false, candidate.priority, schedulerStrategyRoundRobin, predicate,
+		)
+		if picked == nil {
 			continue
 		}
-		if providerIndex != startProviderIndex {
-			slot = segmentStarts[providerIndex]
+		s.mixedCursors[cursorKey] = start + offset + 1
+		return picked, candidate.providerKey, nil
+	}
+	return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
+}
+
+// mixedProviderCandidate is one eligible provider in a mixed-provider route together
+// with the model shard that holds its credentials for the requested model.
+type mixedProviderCandidate struct {
+	// providerKey is the canonical provider key.
+	providerKey string
+	// shard holds the provider's credentials for the requested canonical model.
+	shard *modelScheduler
+	// priority is the highest ready priority tier for this provider under the
+	// current request predicate.
+	priority int
+}
+
+// collectMixedProviderCandidates returns one candidate per eligible provider that has
+// at least one ready credential for the requested model. The providers are expected in
+// canonical order so that the resulting candidate ring is deterministic.
+func collectMixedProviderCandidates(
+	providers []string,
+	candidateShards []*modelScheduler,
+	predicate func(*scheduledAuth) bool,
+) []mixedProviderCandidate {
+	candidates := make([]mixedProviderCandidate, 0, len(providers))
+	for providerIndex, providerKey := range providers {
+		if providerIndex >= len(candidateShards) {
+			continue
 		}
-		providerKey := normalized[providerIndex]
 		shard := candidateShards[providerIndex]
 		if shard == nil {
 			continue
 		}
-		picked := shard.pickReadyAtPriorityLocked(false, bestPriority, schedulerStrategyRoundRobin, predicate)
-		if picked == nil {
+		priorityReady, okPriority := shard.highestReadyPriorityLocked(false, predicate)
+		if !okPriority {
 			continue
 		}
-		s.mixedCursors[cursorKey] = slot + 1
-		return picked, providerKey, nil
+		candidates = append(candidates, mixedProviderCandidate{
+			providerKey: providerKey,
+			shard:       shard,
+			priority:    priorityReady,
+		})
 	}
-	return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
+	return candidates
+}
+
+// candidatesAtHighestPriority keeps only the candidates that sit in the highest
+// priority tier. Lower tiers stay excluded while the higher tier is healthy, which
+// preserves the existing priority semantics.
+func candidatesAtHighestPriority(candidates []mixedProviderCandidate) []mixedProviderCandidate {
+	if len(candidates) == 0 {
+		return nil
+	}
+	best := candidates[0].priority
+	for _, candidate := range candidates[1:] {
+		if candidate.priority > best {
+			best = candidate.priority
+		}
+	}
+	winning := make([]mixedProviderCandidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		if candidate.priority == best {
+			winning = append(winning, candidate)
+		}
+	}
+	return winning
 }
 
 // mixedUnavailableErrorLocked synthesizes the mixed-provider cooldown or unavailable error.
@@ -741,6 +786,16 @@ func normalizeProviderKeys(providers []string) []string {
 		out = append(out, providerKey)
 	}
 	return out
+}
+
+// canonicalProviderKeys normalizes provider keys and sorts them so that the same
+// eligible provider set always yields one canonical order. Mixed-provider routing
+// state is keyed by this canonical form, so [A, B] and [B, A] share a single cursor
+// scope instead of two order-sensitive ones.
+func canonicalProviderKeys(providers []string) []string {
+	canonical := normalizeProviderKeys(providers)
+	sort.Strings(canonical)
+	return canonical
 }
 
 // containsProvider reports whether provider is present in the normalized provider list.
@@ -1391,27 +1446,6 @@ func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priorit
 		return nil
 	}
 	return picked.auth
-}
-
-func (m *modelScheduler) readyCountAtPriorityLocked(preferWebsocket bool, priority int, predicate func(*scheduledAuth) bool) int {
-	if m == nil {
-		return 0
-	}
-	bucket := m.readyByPriority[priority]
-	if bucket == nil {
-		return 0
-	}
-	view := &bucket.all
-	if preferWebsocket && bucket.ws.pickFirst(predicate) != nil {
-		view = &bucket.ws
-	}
-	count := 0
-	for _, entry := range view.flat {
-		if predicate == nil || predicate(entry) {
-			count++
-		}
-	}
-	return count
 }
 
 // unavailableErrorLocked returns the correct unavailable or cooldown error for the shard.

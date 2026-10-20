@@ -477,7 +477,7 @@ func TestSchedulerPick_CodexWebsocketPrefersWebsocketEnabledAcrossPriorities(t *
 	}
 }
 
-func TestSchedulerPick_MixedProvidersUsesWeightedProviderRotationOverReadyCandidates(t *testing.T) {
+func TestSchedulerPick_MixedProvidersBalancesProvidersBeforeCredentials(t *testing.T) {
 	t.Parallel()
 
 	scheduler := newSchedulerForTest(
@@ -487,8 +487,11 @@ func TestSchedulerPick_MixedProvidersUsesWeightedProviderRotationOverReadyCandid
 		&Auth{ID: "claude-a", Provider: "claude"},
 	)
 
-	wantProviders := []string{"gemini", "gemini", "claude", "gemini"}
-	wantIDs := []string{"gemini-a", "gemini-b", "claude-a", "gemini-a"}
+	// Providers alternate 1:1 even though gemini owns two credentials and claude
+	// owns one. The provider set is canonicalized, so "claude" sorts before
+	// "gemini" and is selected first.
+	wantProviders := []string{"claude", "gemini", "claude", "gemini"}
+	wantIDs := []string{"claude-a", "gemini-a", "claude-a", "gemini-b"}
 	for index := range wantProviders {
 		got, provider, errPick := scheduler.pickMixed(context.Background(), []string{"gemini", "claude"}, "", cliproxyexecutor.Options{}, nil)
 		if errPick != nil {
@@ -877,7 +880,7 @@ func TestSchedulerPick_MixedProvidersPrefersHighestPriorityTier(t *testing.T) {
 	}
 }
 
-func TestManager_PickNextMixed_UsesWeightedProviderRotationBeforeCredentialRotation(t *testing.T) {
+func TestManager_PickNextMixed_BalancesProvidersBeforeCredentialRotation(t *testing.T) {
 	t.Parallel()
 
 	manager := NewManager(nil, &RoundRobinSelector{}, nil)
@@ -893,8 +896,9 @@ func TestManager_PickNextMixed_UsesWeightedProviderRotationBeforeCredentialRotat
 		t.Fatalf("Register(claude-a) error = %v", errRegister)
 	}
 
-	wantProviders := []string{"gemini", "gemini", "claude", "gemini"}
-	wantIDs := []string{"gemini-a", "gemini-b", "claude-a", "gemini-a"}
+	// The provider set is canonicalized, so "claude" sorts before "gemini".
+	wantProviders := []string{"claude", "gemini", "claude", "gemini"}
+	wantIDs := []string{"claude-a", "gemini-a", "claude-a", "gemini-b"}
 	for index := range wantProviders {
 		got, _, provider, errPick := manager.pickNextMixed(context.Background(), []string{"gemini", "claude"}, "", cliproxyexecutor.Options{}, map[string]struct{}{})
 		if errPick != nil {
@@ -2017,8 +2021,8 @@ func TestManagerPluginSchedulerDelegateRoundRobinUsesNativeMixedRotation(t *test
 		handled: true,
 	})
 
-	wantProviders := []string{"gemini", "gemini", "claude", "gemini"}
-	wantIDs := []string{"gemini-a", "gemini-b", "claude-a", "gemini-a"}
+	wantProviders := []string{"claude", "gemini", "claude", "gemini"}
+	wantIDs := []string{"claude-a", "gemini-a", "claude-a", "gemini-b"}
 	for index := range wantProviders {
 		got, _, provider, errPick := manager.pickNextMixed(context.Background(), []string{"gemini", "claude"}, "", cliproxyexecutor.Options{}, nil)
 		if errPick != nil {
@@ -2101,11 +2105,13 @@ func TestManagerInactivePluginSchedulerKeepsMixedFastPath(t *testing.T) {
 	if got == nil {
 		t.Fatalf("pickNextMixed() auth = nil")
 	}
-	if provider != "gemini" {
-		t.Fatalf("pickNextMixed() provider = %q, want gemini", provider)
+	// The eligible provider set is canonicalized, so "claude" sorts before
+	// "gemini" and is selected first.
+	if provider != "claude" {
+		t.Fatalf("pickNextMixed() provider = %q, want claude", provider)
 	}
-	if got.ID != "gemini-a" {
-		t.Fatalf("pickNextMixed() auth.ID = %q, want gemini-a", got.ID)
+	if got.ID != "claude-a" {
+		t.Fatalf("pickNextMixed() auth.ID = %q, want claude-a", got.ID)
 	}
 	if scheduler.calls != 0 {
 		t.Fatalf("scheduler.calls = %d, want %d", scheduler.calls, 0)
@@ -2268,8 +2274,8 @@ func TestManager_PickNextMixed_UsesSchedulerRotation(t *testing.T) {
 		t.Fatalf("Register(claude-a) error = %v", errRegister)
 	}
 
-	wantProviders := []string{"gemini", "gemini", "claude", "gemini"}
-	wantIDs := []string{"gemini-a", "gemini-b", "claude-a", "gemini-a"}
+	wantProviders := []string{"claude", "gemini", "claude", "gemini"}
+	wantIDs := []string{"claude-a", "gemini-a", "claude-a", "gemini-b"}
 	for index := range wantProviders {
 		got, _, provider, errPick := manager.pickNextMixed(context.Background(), []string{"gemini", "claude"}, "", cliproxyexecutor.Options{}, nil)
 		if errPick != nil {
