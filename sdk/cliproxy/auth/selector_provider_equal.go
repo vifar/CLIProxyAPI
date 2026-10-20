@@ -69,8 +69,7 @@ func (s *ProviderEqualSelector) Pick(ctx context.Context, provider, model string
 		byProvider[providerKey] = append(byProvider[providerKey], auth)
 	}
 	if len(byProvider) == 0 {
-		// No provider could be resolved for any candidate: fall back to the
-		// credential ring so the request is still served.
+		// Preserve availability when candidates have no resolvable provider identity.
 		return pickRoundRobinByID(available), nil
 	}
 
@@ -113,7 +112,6 @@ func (s *ProviderEqualSelector) Pick(ctx context.Context, provider, model string
 	return nil, nil
 }
 
-// pickRoundRobinByID picks the next candidate in a ring ordered by credential ID.
 func pickRoundRobinByID(available []*Auth) *Auth {
 	if len(available) == 0 {
 		return nil

@@ -133,7 +133,7 @@ PackyCode provides special discounts for our software users: register using <a h
 - Streaming, non-streaming, and WebSocket responses where supported
 - Function calling/tools support
 - Multimodal input support (text and images)
-- Multiple accounts with round-robin load balancing (Gemini, OpenAI, Claude, Grok)
+- Multiple accounts with [round-robin load balancing](docs/routing/provider-equal-mixed-round-robin.md) (Gemini, OpenAI, Claude, Grok)
 - Simple CLI authentication flows (Gemini, OpenAI, Claude, Grok)
 - Generative Language API Key support
 - AI Studio Build multi-account load balancing
