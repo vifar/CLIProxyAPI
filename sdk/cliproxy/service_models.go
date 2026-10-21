@@ -286,7 +286,7 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 					ms = s.appendPluginModelsForProvider(providerKey, ms, compatExcluded, compat)
 					published = s.registerResolvedModelsForAuthFenced(a, fence, providerKey, applyModelPrefixes(ms, a.Prefix, cfg.ForceModelPrefix))
 				} else {
-					ms = s.appendPluginModels(providerKey, nil, compatExcluded)
+					ms = s.appendPluginModelsForProvider(providerKey, nil, compatExcluded, compat)
 					if len(ms) > 0 {
 						published = s.registerResolvedModelsForAuthFenced(a, fence, providerKey, applyModelPrefixes(ms, a.Prefix, cfg.ForceModelPrefix))
 					} else {
