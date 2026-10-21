@@ -1478,7 +1478,13 @@ func lcpAffinityNamespace(provider, model string, metadata map[string]any) strin
 	if provider == "" || callerScope == "" {
 		return ""
 	}
-	return strings.Join([]string{"lcp:v1", provider, model, callerScope}, "::")
+	// The LCP namespace must carry the same provider-set scope as the explicit
+	// binding namespace, so selection, success, eviction and lookup all address
+	// one namespace. Without it, a mixed request with a caller scope and no
+	// explicit session would keep its original binding after a credential failure
+	// and would read an unscoped binding after the provider set changed.
+	scoped := sessionAffinityNamespace(provider, metadata)
+	return strings.Join([]string{"lcp:v1", scoped, model, callerScope}, "::")
 }
 
 func parseLCPNamespace(ns string) (provider, model, callerScope string, ok bool) {
@@ -1490,6 +1496,10 @@ func parseLCPNamespace(ns string) (provider, model, callerScope string, ok bool)
 	if !found {
 		return "", "", "", false
 	}
+	// A mixed route's namespace carries the provider-set scope, so the provider
+	// segment is "mixed[<providers>]". The scope is not part of the provider
+	// identity.
+	nsProvider = lcpNamespaceProvider(nsProvider)
 	lastIdx := strings.LastIndex(rest, "::")
 	if lastIdx < 0 {
 		return nsProvider, rest, "", true
@@ -1497,6 +1507,15 @@ func parseLCPNamespace(ns string) (provider, model, callerScope string, ok bool)
 	nsModel := rest[:lastIdx]
 	nsCallerScope := rest[lastIdx+2:]
 	return nsProvider, nsModel, nsCallerScope, true
+}
+
+// lcpNamespaceProvider strips a provider-set scope from a namespace provider
+// segment, so "mixed[a,b]" reads as "mixed".
+func lcpNamespaceProvider(segment string) string {
+	if index := strings.Index(segment, "["); index > 0 {
+		return segment[:index]
+	}
+	return segment
 }
 
 func lcpFingerprintsFromMetadata(metadata map[string]any) ([]string, int) {
@@ -1644,8 +1663,11 @@ func (s *SessionAffinitySelector) LookupAffinity(provider, model, sessionID stri
 		if candProvider == "mixed" {
 			for _, cand := range candidates {
 				bounded := cliproxysession.BoundSessionIdentity(cand)
-				prefix := "mixed[" + "::" + bounded + "::" + modelKey
-				for authID := range s.cache.GetByPrefix(prefix) {
+				// A scoped mixed binding is keyed as "mixed[<providers>]::<session>::<model>":
+				// the provider set comes first, then the session and the model. The
+				// scope is therefore matched on its own, and the session and model
+				// are matched as the exact suffix.
+				for authID := range s.cache.GetByScopeSuffix(candProvider, "::"+bounded+"::"+modelKey) {
 					if authFilter != nil && !authFilter(authID) {
 						continue
 					}

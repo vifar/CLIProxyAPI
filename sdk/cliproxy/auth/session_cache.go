@@ -157,6 +157,49 @@ func (c *SessionCache) GetByPrefix(prefix string) map[string]struct{} {
 	return found
 }
 
+// GetByScopeSuffix returns every live auth ID bound under a namespace whose scope
+// may vary, matched on an exact key suffix.
+//
+// A scoped mixed binding is keyed as "<namespace>[<providers>]::<session>::<model>":
+// the provider set comes first and the session and model follow it. Matching the
+// scope as part of a literal prefix would never find those keys, because the
+// scope sits between the namespace and the suffix. This matches the namespace
+// prefix, then the scope, then the exact suffix.
+func (c *SessionCache) GetByScopeSuffix(namespace, suffix string) map[string]struct{} {
+	if c == nil || namespace == "" || suffix == "" {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.ensureInitializedLocked()
+	now := time.Now()
+	found := make(map[string]struct{})
+	for key, entry := range c.entries {
+		if entry.authID == "" {
+			continue
+		}
+		if !now.Before(entry.expiresAt) {
+			continue
+		}
+		if !strings.HasSuffix(key, suffix) {
+			continue
+		}
+		head := strings.TrimSuffix(key, suffix)
+		// The head is the namespace plus its scope: "mixed" or "mixed[a,b]".
+		if head != namespace && !strings.HasPrefix(head, namespace+"[") {
+			continue
+		}
+		if head != namespace {
+			// The scope must be closed, so "mixed[a,b" is not a scoped namespace.
+			if !strings.HasSuffix(head, "]") {
+				continue
+			}
+		}
+		found[entry.authID] = struct{}{}
+	}
+	return found
+}
+
 // Set binds a session to an auth ID with TTL refresh. Existing aliases for the
 // same logical session remain attached when the binding is refreshed or moved.
 func (c *SessionCache) Set(sessionID, authID string) {
