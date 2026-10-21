@@ -9,6 +9,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/modelconfig"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
@@ -282,7 +283,7 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 				// would still be published, and a request could route to it.
 				compatExcluded := compat.ExcludedModels
 				if len(ms) > 0 {
-					ms = s.appendPluginModels(providerKey, ms, compatExcluded)
+					ms = s.appendPluginModelsForProvider(providerKey, ms, compatExcluded, compat)
 					published = s.registerResolvedModelsForAuthFenced(a, fence, providerKey, applyModelPrefixes(ms, a.Prefix, cfg.ForceModelPrefix))
 				} else {
 					ms = s.appendPluginModels(providerKey, nil, compatExcluded)
@@ -307,14 +308,15 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 					// The provider's own exclusions apply to the models a plugin
 					// publishes for it as well.
 					var compatExcluded []string
-					if entry := resolveCompatConfigEntry(cfg, a); entry != nil {
-						compatExcluded = entry.ExcludedModels
+					compat := resolveCompatConfigEntry(cfg, a)
+					if compat != nil {
+						compatExcluded = compat.ExcludedModels
 					}
 					if len(ms) > 0 {
-						ms = s.appendPluginModels(providerKey, ms, compatExcluded)
+						ms = s.appendPluginModelsForProvider(providerKey, ms, compatExcluded, compat)
 						published = s.registerResolvedModelsForAuthFenced(a, fence, providerKey, applyModelPrefixes(ms, a.Prefix, cfg.ForceModelPrefix))
 					} else {
-						ms = s.appendPluginModels(providerKey, nil, compatExcluded)
+						ms = s.appendPluginModelsForProvider(providerKey, nil, compatExcluded, compat)
 						if len(ms) > 0 {
 							published = s.registerResolvedModelsForAuthFenced(a, fence, providerKey, applyModelPrefixes(ms, a.Prefix, cfg.ForceModelPrefix))
 						} else {
@@ -687,6 +689,76 @@ func oauthExcludedModelsForConfig(cfg *config.Config, provider, authKind string)
 	return cfg.OAuthExcludedModels[providerKey]
 }
 
+// compatCatalogUpstreamIdentity returns the model identity the upstream sees.
+//
+// A model name may carry a thinking suffix in parentheses, such as "(high)", which
+// selects a reasoning effort rather than a different model. The suffix is stripped
+// before the request reaches the provider.
+func compatCatalogUpstreamIdentity(modelID string) string {
+	trimmed := strings.TrimSpace(modelID)
+	if trimmed == "" {
+		return ""
+	}
+	parsed := thinking.ParseSuffix(trimmed)
+	if !parsed.HasSuffix {
+		return trimmed
+	}
+	base := strings.TrimSpace(parsed.ModelName)
+	if base == "" {
+		return trimmed
+	}
+	return base
+}
+
+// compatPluginUpstreamNames maps the configured aliases of a provider to their
+// upstream model names.
+func compatPluginUpstreamNames(entry *config.OpenAICompatibility) map[string]string {
+	if entry == nil {
+		return nil
+	}
+	out := make(map[string]string, len(entry.Models))
+	for _, model := range entry.Models {
+		alias := strings.ToLower(strings.TrimSpace(model.Alias))
+		name := strings.ToLower(strings.TrimSpace(model.Name))
+		if alias != "" && name != "" {
+			out[alias] = name
+		}
+	}
+	return out
+}
+
+// applyCompatExcludedModels filters the models a plugin published for a
+// compatible provider.
+//
+// A plugin may publish a model under a configured alias, so the exclusion has to
+// be matched against the upstream identity that alias names. Otherwise an excluded
+// upstream is still published, and a request routed through the alias reaches it.
+func applyCompatExcludedModels(models []*ModelInfo, excluded []string, entry *config.OpenAICompatibility) []*ModelInfo {
+	if len(models) == 0 || len(excluded) == 0 {
+		return models
+	}
+	upstreams := compatPluginUpstreamNames(entry)
+	filtered := make([]*ModelInfo, 0, len(models))
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		id := strings.ToLower(strings.TrimSpace(model.ID))
+		upstream := id
+		if mapped, ok := upstreams[id]; ok {
+			upstream = mapped
+		}
+		if config.CompatCatalogModelExcluded(upstream, excluded) {
+			continue
+		}
+		if config.CompatCatalogModelExcluded(id, excluded) {
+			continue
+		}
+		filtered = append(filtered, model)
+	}
+	return filtered
+}
+
 func applyExcludedModels(models []*ModelInfo, excluded []string) []*ModelInfo {
 	if len(models) == 0 || len(excluded) == 0 {
 		return models
@@ -708,9 +780,18 @@ func applyExcludedModels(models []*ModelInfo, excluded []string) []*ModelInfo {
 			continue
 		}
 		modelID := strings.ToLower(strings.TrimSpace(model.ID))
+		// The executor strips a thinking suffix before sending the request
+		// upstream, so the identity that reaches the provider is the name
+		// without it. An exclusion written for that identity must match too,
+		// or an excluded model is still served.
+		upstreamID := strings.ToLower(strings.TrimSpace(compatCatalogUpstreamIdentity(modelID)))
 		blocked := false
 		for _, pattern := range patterns {
 			if matchWildcard(pattern, modelID) {
+				blocked = true
+				break
+			}
+			if upstreamID != modelID && matchWildcard(pattern, upstreamID) {
 				blocked = true
 				break
 			}

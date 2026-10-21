@@ -526,7 +526,18 @@ func (s *Service) pluginModelsForProvider(providerKey string) []*ModelInfo {
 // Callers filter native models before applying OAuth aliases, so plugin models are filtered
 // here by their original IDs instead of re-filtering the merged list by alias names.
 func (s *Service) appendPluginModels(providerKey string, models []*ModelInfo, excluded []string) []*ModelInfo {
-	pluginModels := applyExcludedModels(s.pluginModelsForProvider(providerKey), excluded)
+	return s.appendPluginModelsForProvider(providerKey, models, excluded, nil)
+}
+
+// appendPluginModelsForProvider appends the provider's plugin static models that
+// are not excluded.
+//
+// The compatible provider's entry is used to resolve a plugin model's upstream
+// identity, so an exclusion for the upstream is honoured even when the plugin
+// published the model under a configured alias.
+func (s *Service) appendPluginModelsForProvider(providerKey string, models []*ModelInfo, excluded []string, entry *config.OpenAICompatibility) []*ModelInfo {
+	pluginModels := applyCompatExcludedModels(s.pluginModelsForProvider(providerKey), excluded, entry)
+	pluginModels = applyExcludedModels(pluginModels, excluded)
 	if len(pluginModels) == 0 {
 		return models
 	}
@@ -673,9 +684,19 @@ func (s *Service) tryRegisterPluginModelsForAuthWithProviderExclusions(ctx conte
 	if ctx != nil && ctx.Err() != nil {
 		return true, true
 	}
+	// The compatible provider's entry resolves a plugin model's upstream
+	// identity.
+	var compatEntry *config.OpenAICompatibility
+	if _, _, ok := openAICompatInfoFromAuth(a); ok {
+		compatEntry = resolveCompatConfigEntry(cfg, a)
+	}
 	models := applyExcludedModels(result.Models, activeExcluded)
 	// The provider's own exclusions apply whatever the other sources resolved
-	// to, so an excluded model is never published.
+	// to, so an excluded model is never published. A compatible provider's
+	// entry resolves a plugin model's upstream identity, so an exclusion for
+	// the upstream is honoured even when the plugin published the model under a
+	// configured alias.
+	models = applyCompatExcludedModels(models, providerExcluded, compatEntry)
 	models = applyExcludedModels(models, providerExcluded)
 	models = applyOAuthModelAliasForAuth(cfg, providerKey, activeAuthKind, activeAuth.Attributes, models)
 	publicationFence := fence

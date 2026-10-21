@@ -673,7 +673,9 @@ func (m *Manager) rebuildAPIKeyModelAliasLocked(cfg *internalconfig.Config) {
 			}
 			if compatName != "" || strings.EqualFold(strings.TrimSpace(auth.Provider), "openai-compatibility") {
 				if entry := resolveOpenAICompatConfigForAuth(cfg, auth, providerKey, compatName); entry != nil {
-					compileAPIKeyModelAliasForModels(byAlias, entry.Models)
+					// The filtered rows are used, so an excluded model cannot be
+					// reached through its alias.
+					compileAPIKeyModelAliasForModels(byAlias, compatConfigRoutableModels(entry))
 				}
 			}
 		}
@@ -969,7 +971,9 @@ func resolveUpstreamModelForOpenAICompatAPIKey(cfg *internalconfig.Config, auth 
 	if entry == nil {
 		return ""
 	}
-	return resolveModelAliasFromConfigModels(requestedModel, asModelAliasEntries(entry.Models))
+	// The filtered rows are used, so an excluded model cannot be reached
+	// through its alias.
+	return resolveModelAliasFromConfigModels(requestedModel, asModelAliasEntries(compatConfigRoutableModels(entry)))
 }
 
 type apiKeyModelAliasTable map[string]map[string]string
