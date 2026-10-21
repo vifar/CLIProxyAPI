@@ -2286,7 +2286,7 @@ func TestXAIWebsockets_KeepalivePingDuringUpload_WithSession(t *testing.T) {
 				t.Errorf("unexpected pong payload: got %q, want xai-session-ping", got)
 			}
 			close(pongDeliveredDuringWrite)
-		case <-time.After(30 * time.Second):
+		case <-time.After(5 * time.Second):
 			t.Errorf("pong was not received while payload write was in progress")
 			return
 		}
@@ -2398,7 +2398,7 @@ func TestXAIWebsockets_KeepalivePingDuringUpload_Sessionless(t *testing.T) {
 				t.Errorf("unexpected pong payload: got %q, want xai-sessionless-ping", got)
 			}
 			close(pongDeliveredDuringWrite)
-		case <-time.After(30 * time.Second):
+		case <-time.After(5 * time.Second):
 			t.Errorf("pong was not received while payload write was in progress on sessionless connection")
 			return
 		}

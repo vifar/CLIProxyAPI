@@ -2653,7 +2653,7 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_WithSession(t *testing.T) {
 		// Wait until server confirms pong was received before allowing write to finish.
 		select {
 		case <-pongDeliveredDuringWrite:
-		case <-time.After(10 * time.Second):
+		case <-time.After(20 * time.Second):
 			t.Error("timed out waiting for pong delivery while payload write was held in hook")
 		}
 	}
@@ -2703,7 +2703,7 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_WithSession(t *testing.T) {
 				t.Errorf("unexpected pong payload: got %q, want session-ping", got)
 			}
 			close(pongDeliveredDuringWrite)
-		case <-time.After(10 * time.Second):
+		case <-time.After(5 * time.Second):
 			t.Errorf("pong was not received while payload write was in progress")
 			return
 		}
@@ -2767,7 +2767,7 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_Sessionless(t *testing.T) {
 		close(inWriteHook)
 		select {
 		case <-pongDeliveredDuringWrite:
-		case <-time.After(10 * time.Second):
+		case <-time.After(20 * time.Second):
 			t.Error("timed out waiting for pong delivery while payload write was held in hook")
 		}
 	}
@@ -2814,7 +2814,7 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_Sessionless(t *testing.T) {
 				t.Errorf("unexpected pong payload: got %q, want sessionless-ping", got)
 			}
 			close(pongDeliveredDuringWrite)
-		case <-time.After(10 * time.Second):
+		case <-time.After(5 * time.Second):
 			t.Errorf("pong was not received while payload write was in progress on sessionless connection")
 			return
 		}
@@ -2874,7 +2874,7 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_NonstreamSessionless(t *testi
 		close(inWriteHook)
 		select {
 		case <-pongDeliveredDuringWrite:
-		case <-time.After(10 * time.Second):
+		case <-time.After(20 * time.Second):
 			t.Error("timed out waiting for pong delivery while nonstream payload write was held in hook")
 		}
 	}
@@ -2921,7 +2921,7 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_NonstreamSessionless(t *testi
 				t.Errorf("unexpected pong payload: got %q, want nonstream-sessionless-ping", got)
 			}
 			close(pongDeliveredDuringWrite)
-		case <-time.After(10 * time.Second):
+		case <-time.After(5 * time.Second):
 			t.Errorf("pong was not received while payload write was in progress on nonstream sessionless connection")
 			return
 		}
@@ -3158,7 +3158,7 @@ func TestCodexWebsockets_ChunkedWriteAllowsPongInterleaving(t *testing.T) {
 			}
 			close(pongReceivedBeforeReadComplete)
 			close(allowRemainingChunks)
-		case <-time.After(10 * time.Second):
+		case <-time.After(3 * time.Second):
 			t.Errorf("pong was not received while client was paused between chunks")
 			close(allowRemainingChunks)
 			return
