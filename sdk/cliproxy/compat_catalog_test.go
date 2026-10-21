@@ -2,7 +2,10 @@ package cliproxy
 
 import (
 	"context"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )
@@ -150,4 +153,113 @@ func TestCompatCatalogOperatorRowsAreKeptApartFromTheLiveList(t *testing.T) {
 	if len(got) != 1 || got[0].Name != "operator-model" {
 		t.Fatalf("operator rows = %+v, want only the operator's row", got)
 	}
+}
+
+// TestCompatCatalogModelsForKeepsTheConfigurationUntouched asserts that the
+// models a provider's live list contributed are merged into a copy, never into the
+// configuration the operator wrote.
+//
+// The configuration is handed to the management API and a supported configuration
+// write saves it back to the file. A discovered row written back would become a
+// permanent pin that the live list could never take back.
+func TestCompatCatalogModelsForKeepsTheConfigurationUntouched(t *testing.T) {
+	t.Parallel()
+
+	service := &Service{cfg: &config.Config{}}
+	manager := newCompatCatalogManager(service)
+
+	operator := []config.OpenAICompatibilityModel{{Name: "operator-model", Alias: "operator-model"}}
+	compat := &config.OpenAICompatibility{
+		Name:    "ollama-cloud",
+		BaseURL: "https://ollama.com/v1",
+		Models:  operator,
+	}
+
+	target := compatCatalogTarget{
+		entryIndex: 0,
+		name:       compat.Name,
+		baseURL:    compat.BaseURL,
+		apiKey:     "k",
+	}
+	manager.mu.Lock()
+	manager.state[target.key()] = &compatCatalogState{
+		target: target,
+		models: []config.CompatCatalogModel{{ID: "discovered-model"}},
+	}
+	manager.mu.Unlock()
+
+	merged := manager.modelsFor(compat)
+	if len(merged.Models) != 2 {
+		t.Fatalf("merged models = %+v, want the operator's row and the discovered one", merged.Models)
+	}
+	// The configuration the operator wrote is unchanged.
+	if len(compat.Models) != 1 || compat.Models[0].Name != "operator-model" {
+		t.Fatalf("the configuration was changed: %+v", compat.Models)
+	}
+	// The merged entry is a copy.
+	if merged == compat {
+		t.Fatal("the merged entry must be a copy")
+	}
+}
+
+// TestCompatCatalogRefreshIsolatesProviders asserts that a provider which never
+// completes its response does not stop the other providers from being read.
+//
+// The providers are read on their own goroutines, so one stalled provider cannot
+// block the others or prevent the results they did return from being published.
+func TestCompatCatalogRefreshIsolatesProviders(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{
+			{Name: "ollama-cloud", BaseURL: "https://ollama.com/v1",
+				APIKeyEntries: []config.OpenAICompatibilityAPIKey{{APIKey: "k"}}},
+			{Name: "openrouter", BaseURL: "https://openrouter.ai/api/v1",
+				APIKeyEntries: []config.OpenAICompatibilityAPIKey{{APIKey: "k"}}},
+		},
+	}
+	service := &Service{cfg: cfg}
+	manager := newCompatCatalogManager(service)
+
+	stalled := make(chan struct{})
+	var stalledOnce sync.Once
+	manager.fetcher = func(_ context.Context, endpoint, _, _ string) ([]byte, int, error) {
+		if strings.Contains(endpoint, "ollama.com") {
+			stalledOnce.Do(func() { close(stalled) })
+			<-stalled
+			return nil, 0, context.Canceled
+		}
+		return []byte(`{"data":[{"id":"openrouter-model"}]}`), 200, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		manager.Refresh(ctx)
+		close(done)
+	}()
+
+	// The stalled provider is reached, and the other one has still answered.
+	select {
+	case <-stalled:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the stalled provider was never reached")
+	}
+
+	// The answered provider's list is available even though the other one has not
+	// returned.
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, state := range manager.state {
+			if state != nil && state.target.name == "openrouter" && len(state.models) == 1 {
+				cancel()
+				<-done
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	t.Fatal("the answered provider's result was not recorded while the other one stalled")
 }

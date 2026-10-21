@@ -258,7 +258,12 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 				// buildOpenAICompatibilityConfigModels. A second pass here would
 				// filter the public alias instead, which would drop a model whose
 				// alias happens to match an excluded name.
-				ms := buildOpenAICompatibilityConfigModels(compat)
+				//
+				// The models a provider's live model list contributed are merged in
+				// here, at the registration boundary, rather than in the
+				// configuration. The configuration is the operator's, and a
+				// discovered row written back to it would become a permanent pin.
+				ms := buildOpenAICompatibilityConfigModels(s.compatModelsFor(compat))
 				if providerKey == "" {
 					providerKey = "openai-compatibility"
 				}
@@ -860,6 +865,25 @@ func compatCatalogUpstreamName(model config.OpenAICompatibilityModel) string {
 		return name
 	}
 	return strings.TrimSpace(model.Alias)
+}
+
+// compatModelsFor returns a provider entry whose model list also carries the
+// models its live model list contributed.
+//
+// The entry is a copy, so the configuration the operator wrote is never changed:
+// a discovered row belongs to the runtime, and writing it back would turn it into
+// a permanent pin the live list could never take back.
+func (s *Service) compatModelsFor(compat *config.OpenAICompatibility) *config.OpenAICompatibility {
+	if s == nil || compat == nil {
+		return compat
+	}
+	s.cfgMu.RLock()
+	manager := s.compatCatalog
+	s.cfgMu.RUnlock()
+	if manager == nil {
+		return compat
+	}
+	return manager.modelsFor(compat)
 }
 
 func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []*ModelInfo {
