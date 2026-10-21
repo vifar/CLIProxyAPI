@@ -121,11 +121,11 @@ func TestServiceConcurrentReplacementWaitsForInFlightDrain(t *testing.T) {
 		homeCancel:   oldCancel,
 		homeClient:   home.New(internalconfig.HomeConfig{Enabled: true}),
 		homeRegistry: registry,
-		// The drain bound has to be longer than the window in which the second
-		// replacement must not return. With a one second bound the drain could
-		// finish inside the window, and the second replacement would then return
-		// without ever having waited: the test failed against correct code.
-		homeDrainBound: 5 * time.Second,
+		// The drain bound is long enough that it cannot expire while the test
+		// runs. The drain ends when the reservation is released, so the bound is
+		// only a safety net, and a bound that could expire would let the test
+		// observe the bound rather than the behaviour it is about.
+		homeDrainBound: time.Hour,
 	}
 
 	firstReturned := make(chan struct{})
@@ -170,15 +170,18 @@ func TestServiceConcurrentReplacementWaitsForInFlightDrain(t *testing.T) {
 		service.startHomeSubscriber(ctx)
 		close(secondReturned)
 	}()
+	// The second replacement must still be waiting: the drain has not been
+	// released yet, so the only way it could have returned is by not waiting at
+	// all.
+	//
+	// The check is a window rather than a deadline on the behaviour: the
+	// assertion is that it has not returned, and the completion below is
+	// required.
 	select {
 	case <-secondReturned:
 		t.Fatal("concurrent replacement returned before the first drain completed")
 	case <-time.After(time.Second):
-		// The second replacement is still waiting for the first drain, which is
-		// what the test is about. It returns once the drain is released below.
-		//
-		// The wait is a window, not the assertion: the assertion is below, where
-		// the release happens and the completion is required.
+		// Still waiting for the first drain, which is what the test is about.
 	}
 
 	pending.End()
