@@ -2,6 +2,8 @@ package auth
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
@@ -1405,8 +1407,15 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	// too, but those are separate bindings with their own affinity: a failure
 	// recorded for the parent is not a failure of the subagent's binding.
 	failedProvider := s.takeFailedBinding(cacheKey)
-	if failedProvider == "" && fallbackKey != "" && !isSubagent && !isFork {
-		failedProvider = s.takeFailedBinding(fallbackKey)
+	if fallbackKey != "" && !isSubagent && !isFork {
+		// The primary and the alias point at the same binding, so both records
+		// describe the same failure. They are consumed together, so a stale
+		// record under the alias cannot be picked up later by an unrelated
+		// replacement and reported against the wrong provider.
+		aliasProvider := s.takeFailedBinding(fallbackKey)
+		if failedProvider == "" {
+			failedProvider = aliasProvider
+		}
 	}
 	if failedProvider != "" {
 		// The credential this session was bound to failed, so this is the
@@ -1702,14 +1711,30 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 			// The bound provider is remembered, so a later replacement of this
 			// binding can be told apart from a replacement in another provider even
 			// after the bound credential has left the available candidates.
-			if providerKey := s.routingProviderKey(auth); providerKey != "" {
-				s.rememberBoundProvider(auth.ID, providerKey)
+			hitProvider := s.routingProviderKey(auth)
+			if hitProvider != "" {
+				s.rememberBoundProvider(auth.ID, hitProvider)
+			}
+			// A hit can still be the retry of a failed sequence. The matched
+			// binding may be a surviving ancestor, and the sequence that actually
+			// failed may be a later extension of it. The exact sequence's
+			// retained failure decides the transition, so the retry is not
+			// reported as a plain hit.
+			transition := RoutingTransitionBindingHit
+			previousProvider := ""
+			if failedProvider := s.takeFailedBinding(lcpFailedBindingKey(namespace, cliproxysession.SequenceIdentity(fingerprints))); failedProvider != "" {
+				transition = RoutingTransitionCredentialReselected
+				if hitProvider != "" && hitProvider != failedProvider {
+					transition = RoutingTransitionProviderFailover
+				}
+				previousProvider = failedProvider
 			}
 			recordRoutingTransition(ctx, RoutingTransitionEvent{
-				Transition: RoutingTransitionBindingHit,
-				Model:      model,
-				Provider:   s.routingProviderKey(auth),
-				Session:    match.SessionID,
+				Transition:       transition,
+				Model:            model,
+				Provider:         hitProvider,
+				PreviousProvider: previousProvider,
+				Session:          match.SessionID,
 			})
 			return auth, true, nil
 		}
@@ -1939,12 +1964,20 @@ func selectorLogEntry(ctx context.Context) *log.Entry {
 	return log.NewEntry(log.StandardLogger())
 }
 
-// truncateSessionID shortens session ID for logging (first 8 chars + "...")
+// truncateSessionID shortens a session identifier for logging.
+//
+// The prefix of a session identifier is not always distinguishing. An LCP
+// session identifier starts with "lcp:v1:" and continues with a hex digest, so
+// keeping only the first few characters leaves every LCP session with the same
+// short form and makes unrelated sessions indistinguishable in the recorded
+// events. The digest is therefore derived from the whole identifier, so two
+// different sessions get two different short forms.
 func truncateSessionID(id string) string {
 	if len(id) <= 20 {
 		return id
 	}
-	return id[:8] + "..."
+	sum := sha256.Sum256([]byte(id))
+	return id[:8] + "..." + hex.EncodeToString(sum[:4])
 }
 
 // Stop releases resources held by the selector.

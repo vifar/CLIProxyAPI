@@ -525,3 +525,62 @@ func TestRoutingTransitionRecordsAnAliasReplacement(t *testing.T) {
 		t.Fatalf("provider failover = %d, want 1: %+v", totals[string(RoutingTransitionProviderFailover)], totals)
 	}
 }
+
+// TestTruncateSessionIDDistinguishesLCPSessions asserts that two different LCP
+// session identifiers get two different short forms.
+//
+// An LCP session identifier starts with "lcp:v1:" and continues with a hex
+// digest, so keeping only the first few characters leaves every LCP session
+// with the same short form.
+func TestTruncateSessionIDDistinguishesLCPSessions(t *testing.T) {
+	t.Parallel()
+
+	// Two LCP sessions whose identifiers share their first characters, so only
+	// the digest distinguishes them.
+	first := "lcp:v1:" + strings.Repeat("a", 32) + strings.Repeat("b", 32)
+	second := "lcp:v1:" + strings.Repeat("a", 32) + strings.Repeat("c", 32)
+
+	shortFirst := truncateSessionID(first)
+	shortSecond := truncateSessionID(second)
+	if shortFirst == shortSecond {
+		t.Fatalf("two different LCP sessions share the short form %q", shortFirst)
+	}
+	if !strings.HasPrefix(shortFirst, "lcp:v1:") {
+		t.Fatalf("short form = %q, want the prefix preserved", shortFirst)
+	}
+	// A short identifier is returned unchanged.
+	if got := truncateSessionID("short"); got != "short" {
+		t.Fatalf("short form = %q, want it unchanged", got)
+	}
+}
+
+// TestSessionAffinityConsumesTheAliasFailureWithThePrimary asserts that a
+// failure recorded under the alias is consumed together with the primary.
+//
+// The primary and the alias point at the same binding, so a stale record under
+// the alias must not survive to be picked up later by an unrelated replacement.
+func TestSessionAffinityConsumesTheAliasFailureWithThePrimary(t *testing.T) {
+	t.Parallel()
+
+	affinity := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Hour,
+	})
+	t.Cleanup(affinity.Stop)
+
+	const primaryKey = "mixed::session-1::model-1"
+	const aliasKey = "mixed::alias-1::model-1"
+
+	// Both records describe the same failed binding.
+	affinity.rememberFailedBinding(primaryKey, "provider-a")
+	affinity.rememberFailedBinding(aliasKey, "provider-a")
+
+	// The primary is consumed.
+	if got := affinity.takeFailedBinding(primaryKey); got != "provider-a" {
+		t.Fatalf("failed provider = %q, want provider-a", got)
+	}
+	// The alias is consumed at the same time, by the same read.
+	if got := affinity.takeFailedBinding(aliasKey); got != "provider-a" {
+		t.Fatalf("failed provider = %q, want provider-a", got)
+	}
+}
