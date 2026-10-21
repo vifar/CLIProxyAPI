@@ -378,3 +378,91 @@ func TestSessionAffinityCopySharesTheAffinityState(t *testing.T) {
 		t.Fatal("the copy must share the affinity state object")
 	}
 }
+
+// TestLCPFailureRecordUsesTheSessionIdentity asserts that an LCP failure is
+// recorded under the conversation's session identity, not under the credential.
+//
+// The retry binds a different credential, so a credential-keyed record would never
+// be found and the retry would be reported as a created binding. The session is
+// also what keeps an unrelated conversation that chooses the same credential from
+// consuming the record.
+func TestLCPFailureRecordUsesTheSessionIdentity(t *testing.T) {
+	t.Parallel()
+
+	affinity := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Hour,
+	})
+	t.Cleanup(affinity.Stop)
+
+	const namespace = "lcp:v1::mixed::model-1::caller-1"
+
+	// The failure is recorded under the session.
+	affinity.rememberFailedBinding(lcpFailedBindingKey(namespace, "session-1"), "provider-a")
+
+	// The retry binds a different credential and reads the record under the
+	// session, so it is found.
+	if got := affinity.takeFailedBinding(lcpFailedBindingKey(namespace, "session-1")); got != "provider-a" {
+		t.Fatalf("failed provider = %q, want provider-a", got)
+	}
+
+	// The record is consumed once.
+	if got := affinity.takeFailedBinding(lcpFailedBindingKey(namespace, "session-1")); got != "" {
+		t.Fatalf("failed provider = %q, want the record to be consumed", got)
+	}
+}
+
+// TestLCPFailureRecordIsNotConsumedByAnotherConversation asserts that a
+// conversation with a different session does not consume the record.
+func TestLCPFailureRecordIsNotConsumedByAnotherConversation(t *testing.T) {
+	t.Parallel()
+
+	affinity := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Hour,
+	})
+	t.Cleanup(affinity.Stop)
+
+	const namespace = "lcp:v1::mixed::model-1::caller-1"
+	affinity.rememberFailedBinding(lcpFailedBindingKey(namespace, "session-1"), "provider-a")
+
+	// A different conversation that happens to use the same credential does not
+	// find the record.
+	if got := affinity.takeFailedBinding(lcpFailedBindingKey(namespace, "session-2")); got != "" {
+		t.Fatalf("failed provider = %q, want no record for another conversation", got)
+	}
+
+	// The record is still there for the conversation that failed.
+	if got := affinity.takeFailedBinding(lcpFailedBindingKey(namespace, "session-1")); got != "provider-a" {
+		t.Fatalf("failed provider = %q, want provider-a", got)
+	}
+}
+
+// TestSessionAffinityRemembersTheProviderOfEveryBinding asserts that the bound
+// provider is remembered for every binding, so a chain of replacements is
+// classified correctly.
+//
+// For A to B to C, with each credential becoming unavailable before the next
+// hit, A to B is classified from the remembered provider of A, and B to C needs
+// the provider of B to have been remembered as well.
+func TestSessionAffinityRemembersTheProviderOfEveryBinding(t *testing.T) {
+	t.Parallel()
+
+	affinity := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Hour,
+	})
+	t.Cleanup(affinity.Stop)
+
+	// The provider is remembered on the binding path, so the next replacement
+	// can be classified.
+	affinity.rememberBoundProvider("auth-b", "provider-b")
+	if got := affinity.boundProviderFor("auth-b", nil); got != "provider-b" {
+		t.Fatalf("bound provider = %q, want provider-b", got)
+	}
+
+	// A replacement in another provider is a provider failover.
+	if affinity.boundProviderFor("auth-b", nil) == "provider-a" {
+		t.Fatal("the remembered provider must be the bound one")
+	}
+}
