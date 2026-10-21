@@ -174,6 +174,22 @@ func (s *Service) configCommitCurrent(commit configCommit) bool {
 	return current
 }
 
+// configSequenceCurrent reports whether the configuration sequence is still the
+// given one.
+//
+// A caller that computed a change against a configuration snapshot uses this to
+// check that the snapshot is still current before applying the change, so a
+// configuration committed in the meantime is never overwritten.
+func (s *Service) configSequenceCurrent(sequence uint64) bool {
+	if s == nil || sequence == 0 {
+		return false
+	}
+	s.configUpdateMu.Lock()
+	current := s.configSequence == sequence
+	s.configUpdateMu.Unlock()
+	return current
+}
+
 func (s *Service) applyConfigRuntime(ctx context.Context, commit configCommit, synthesizeConfigAuths bool) bool {
 	cfg := commit.cfg
 	if s == nil || cfg == nil {
