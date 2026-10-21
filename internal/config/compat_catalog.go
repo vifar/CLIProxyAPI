@@ -225,6 +225,10 @@ func MergeCompatCatalogModels(configured []OpenAICompatibilityModel, live []Comp
 	}
 	merged := make([]OpenAICompatibilityModel, 0, len(configured)+len(live))
 	known := make(map[string]struct{}, len(configured))
+	// The operator's public aliases are reserved too: a discovered model whose
+	// name matches an operator's alias would make requests for that alias
+	// round-robin between two different upstreams.
+	aliases := make(map[string]struct{}, len(configured))
 	for _, model := range configured {
 		merged = append(merged, model)
 		key := compatCatalogModelKey(model)
@@ -235,6 +239,9 @@ func MergeCompatCatalogModels(configured []OpenAICompatibilityModel, live []Comp
 			continue
 		}
 		known[key] = struct{}{}
+		if alias := strings.TrimSpace(model.Alias); alias != "" {
+			aliases[alias] = struct{}{}
+		}
 	}
 	for _, candidate := range live {
 		id := strings.TrimSpace(candidate.ID)
@@ -242,6 +249,10 @@ func MergeCompatCatalogModels(configured []OpenAICompatibilityModel, live []Comp
 			continue
 		}
 		if _, ok := known[id]; ok {
+			continue
+		}
+		if _, ok := aliases[id]; ok {
+			// The operator already publishes this name as an alias.
 			continue
 		}
 		if CompatCatalogModelExcluded(id, excluded) {

@@ -291,6 +291,9 @@ func (b *Builder) Build() (*Service, error) {
 		discoveryManager:    newDiscoveryAdvertiserManager(),
 		appliedRoutingState: appliedRoutingState,
 		serverOptions:       append([]api.ServerOption(nil), b.serverOptions...),
+		// The configuration sequence starts at one, so a change computed against
+		// the initial configuration is still current when it is applied.
+		configSequence: 1,
 	}
 	if b.postAuthHook != nil {
 		service.serverOptions = append(service.serverOptions, api.WithPostAuthHook(b.postAuthHook))

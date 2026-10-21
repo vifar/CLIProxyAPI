@@ -254,8 +254,11 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 					return false
 				}
 				isCompatAuth = true
+				// The exclusions are applied against the upstream model name inside
+				// buildOpenAICompatibilityConfigModels. A second pass here would
+				// filter the public alias instead, which would drop a model whose
+				// alias happens to match an excluded name.
 				ms := buildOpenAICompatibilityConfigModels(compat)
-				ms = applyExcludedModels(ms, compat.ExcludedModels)
 				if providerKey == "" {
 					providerKey = "openai-compatibility"
 				}
