@@ -194,7 +194,7 @@ func (r *RoutingTransitionRecorder) Snapshot() RoutingTransitionSnapshot {
 	defer r.mu.Unlock()
 
 	counters := make([]RoutingTransitionCounter, 0, len(r.counters))
-	totals := make(map[string]uint64, len(RoutingTransitionValues()))
+	totals := make(map[string]uint64, len(r.counters))
 	for key, count := range r.counters {
 		counters = append(counters, RoutingTransitionCounter{
 			Transition: string(key.transition),
@@ -218,15 +218,6 @@ func (r *RoutingTransitionRecorder) Snapshot() RoutingTransitionSnapshot {
 	return RoutingTransitionSnapshot{Counters: counters, Totals: totals, Events: events}
 }
 
-// RoutingTransitionCounters returns the counters as a flat list, sorted for a
-// stable presentation.
-func (r *RoutingTransitionRecorder) RoutingTransitionCounters() []RoutingTransitionCounter {
-	if r == nil {
-		return nil
-	}
-	return r.Snapshot().Counters
-}
-
 // RoutingTransitionCounter is one counted routing transition.
 type RoutingTransitionCounter struct {
 	// Transition names the transition.
@@ -239,37 +230,6 @@ type RoutingTransitionCounter struct {
 	Count uint64 `json:"count"`
 }
 
-// RoutingTransitionEvents returns the most recent events, newest last.
-func (r *RoutingTransitionRecorder) RoutingTransitionEvents() []RoutingTransitionEvent {
-	if r == nil {
-		return nil
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	out := make([]RoutingTransitionEvent, len(r.events))
-	copy(out, r.events)
-	return out
-}
-
-// RoutingTransitionTotals returns the total count per transition.
-func (r *RoutingTransitionRecorder) RoutingTransitionTotals() map[string]uint64 {
-	if r == nil {
-		return nil
-	}
-	return r.Snapshot().Totals
-}
-
-// RoutingTransitionValues returns every known transition.
-func RoutingTransitionValues() []RoutingTransition {
-	return []RoutingTransition{
-		RoutingTransitionBindingCreated,
-		RoutingTransitionBindingHit,
-		RoutingTransitionCredentialReselected,
-		RoutingTransitionProviderFailover,
-		RoutingTransitionNoEligibleProvider,
-	}
-}
-
 // truncateRoutingTransitionKey bounds a counted model or provider name.
 func truncateRoutingTransitionKey(value string) string {
 	trimmed := strings.TrimSpace(value)
@@ -277,12 +237,13 @@ func truncateRoutingTransitionKey(value string) string {
 		return ""
 	}
 	if len(trimmed) > maxRoutingTransitionKeyLength {
-		// The slice keeps the whole backing allocation, so the truncated value is
-		// copied out. A client that sends a very long model name must not be able
-		// to pin a large allocation per counter key.
-		return string([]byte(trimmed[:maxRoutingTransitionKeyLength]))
+		trimmed = trimmed[:maxRoutingTransitionKeyLength]
 	}
-	return trimmed
+	// The retained name is always copied out. A name that trims to a short
+	// substring still points at the whole original allocation, so a client that
+	// pads a model name with whitespace would otherwise pin a large allocation
+	// per counter key.
+	return string([]byte(trimmed))
 }
 
 // routingTransitionRecorder is the process-wide recorder. It is set by the

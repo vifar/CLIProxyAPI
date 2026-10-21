@@ -35,7 +35,7 @@ func TestRoutingTransitionRecorderCountsEachTransition(t *testing.T) {
 		Session:    "session-1",
 	})
 
-	counters := recorder.RoutingTransitionCounters()
+	counters := recorder.Snapshot().Counters
 	if len(counters) != 2 {
 		t.Fatalf("counters = %+v, want 2", counters)
 	}
@@ -46,7 +46,7 @@ func TestRoutingTransitionRecorderCountsEachTransition(t *testing.T) {
 		t.Fatalf("binding hit counter = %+v, want count 1", counters[1])
 	}
 
-	totals := recorder.RoutingTransitionTotals()
+	totals := recorder.Snapshot().Totals
 	if totals[string(RoutingTransitionBindingCreated)] != 2 {
 		t.Fatalf("totals = %+v", totals)
 	}
@@ -63,7 +63,7 @@ func TestRoutingTransitionRecorderKeepsEventsBounded(t *testing.T) {
 			Session:    "session",
 		})
 	}
-	if events := recorder.RoutingTransitionEvents(); len(events) != 3 {
+	if events := recorder.Snapshot().Events; len(events) != 3 {
 		t.Fatalf("events len = %d, want 3", len(events))
 	}
 }
@@ -79,7 +79,7 @@ func TestRoutingTransitionRecorderBoundsTheCounterKeys(t *testing.T) {
 		Model:      long,
 		Provider:   long,
 	})
-	counters := recorder.RoutingTransitionCounters()
+	counters := recorder.Snapshot().Counters
 	if len(counters) != 1 {
 		t.Fatalf("counters = %+v", counters)
 	}
@@ -96,7 +96,7 @@ func TestRoutingTransitionRecorderTruncatesTheSessionIdentifier(t *testing.T) {
 		Transition: RoutingTransitionBindingHit,
 		Session:    strings.Repeat("s", 64),
 	})
-	events := recorder.RoutingTransitionEvents()
+	events := recorder.Snapshot().Events
 	if len(events) != 1 {
 		t.Fatalf("events = %+v", events)
 	}
@@ -157,7 +157,7 @@ func TestRoutingTransitionRecordsBindingCreatedAndHit(t *testing.T) {
 	if _, errPick := selector.Pick(context.Background(), "mixed", model, opts, auths); errPick != nil {
 		t.Fatalf("first Pick: %v", errPick)
 	}
-	totals := recorder.RoutingTransitionTotals()
+	totals := recorder.Snapshot().Totals
 	if totals[string(RoutingTransitionBindingCreated)] != 1 {
 		t.Fatalf("binding created = %d, want 1: %+v", totals[string(RoutingTransitionBindingCreated)], totals)
 	}
@@ -169,7 +169,7 @@ func TestRoutingTransitionRecordsBindingCreatedAndHit(t *testing.T) {
 	if _, errPick := selector.Pick(context.Background(), "mixed", model, opts, auths); errPick != nil {
 		t.Fatalf("second Pick: %v", errPick)
 	}
-	totals = recorder.RoutingTransitionTotals()
+	totals = recorder.Snapshot().Totals
 	if totals[string(RoutingTransitionBindingHit)] != 1 {
 		t.Fatalf("binding hit = %d, want 1", totals[string(RoutingTransitionBindingHit)])
 	}
@@ -204,7 +204,7 @@ func TestRoutingTransitionRecordsCredentialReselection(t *testing.T) {
 		t.Fatalf("second Pick: %v", errPick)
 	}
 
-	totals := recorder.RoutingTransitionTotals()
+	totals := recorder.Snapshot().Totals
 	if totals[string(RoutingTransitionCredentialReselected)] != 1 {
 		t.Fatalf("credential reselected = %d, want 1: %+v", totals[string(RoutingTransitionCredentialReselected)], totals)
 	}
@@ -236,7 +236,7 @@ func TestRoutingTransitionRecordsProviderFailover(t *testing.T) {
 		t.Fatalf("second Pick: %v", errPick)
 	}
 
-	totals := recorder.RoutingTransitionTotals()
+	totals := recorder.Snapshot().Totals
 	if totals[string(RoutingTransitionProviderFailover)] != 1 {
 		t.Fatalf("provider failover = %d, want 1: %+v", totals[string(RoutingTransitionProviderFailover)], totals)
 	}
@@ -245,7 +245,7 @@ func TestRoutingTransitionRecordsProviderFailover(t *testing.T) {
 	}
 
 	// The failover event records both the provider it moved to and the one it left.
-	events := recorder.RoutingTransitionEvents()
+	events := recorder.Snapshot().Events
 	found := false
 	for _, event := range events {
 		if event.Transition != RoutingTransitionProviderFailover {
@@ -279,13 +279,13 @@ func TestRoutingTransitionRecorderBoundsTheCounterCardinality(t *testing.T) {
 		})
 	}
 
-	counters := recorder.RoutingTransitionCounters()
+	counters := recorder.Snapshot().Counters
 	if len(counters) > limit+1 {
 		t.Fatalf("counters len = %d, want at most %d plus the overflow bucket", len(counters), limit)
 	}
 
 	// The totals must be exact: every recorded transition is counted.
-	totals := recorder.RoutingTransitionTotals()
+	totals := recorder.Snapshot().Totals
 	if totals[string(RoutingTransitionNoEligibleProvider)] != uint64(limit*2) {
 		t.Fatalf("total = %d, want %d", totals[string(RoutingTransitionNoEligibleProvider)], limit*2)
 	}
@@ -319,7 +319,7 @@ func TestRoutingTransitionRecordsNoEligibleProviderOnTheAffinityPath(t *testing.
 		t.Fatal("expected the request to fail with no eligible credential")
 	}
 
-	totals := recorder.RoutingTransitionTotals()
+	totals := recorder.Snapshot().Totals
 	if totals[string(RoutingTransitionNoEligibleProvider)] != 1 {
 		t.Fatalf("no eligible provider = %d, want 1: %+v", totals[string(RoutingTransitionNoEligibleProvider)], totals)
 	}

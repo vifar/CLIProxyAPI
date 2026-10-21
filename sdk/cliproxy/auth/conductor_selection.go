@@ -442,7 +442,13 @@ func (m *Manager) SetSelector(selector Selector) {
 	// The mixed-provider selector is built once, here, so its rotation state
 	// survives across requests. Building it per selection would reset the
 	// provider cursor on every request and the providers would never alternate.
-	m.mixedSelector = newMixedSelectorFor(selector)
+	//
+	// The provider-equal selector is shared between the mixed selector and the
+	// affinity selector's fallback, so both address one rotation state.
+	if m.providerEqualSelector == nil {
+		m.providerEqualSelector = NewProviderEqualSelector()
+	}
+	m.mixedSelector = newMixedSelectorFor(selector, m.providerEqualSelector)
 	m.mu.Unlock()
 
 	if oldSelector != nil {

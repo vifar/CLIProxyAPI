@@ -172,6 +172,10 @@ type Manager struct {
 	pendingCooldownStateStore CooldownStateStore
 	executors                 map[string]ProviderExecutor
 	selector                  Selector
+	// providerEqualSelector is the shared provider-equal selector. It backs both
+	// the mixed-provider route and the session-affinity selector's fallback, so
+	// they address one rotation state.
+	providerEqualSelector *ProviderEqualSelector
 	// mixedSelector is the selector a mixed-provider route uses. It is built once
 	// when the selector is set, so its provider rotation state survives across
 	// requests.
@@ -256,12 +260,16 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 	if hook == nil {
 		hook = NoopHook{}
 	}
+	// The provider-equal selector is shared by the mixed route and the affinity
+	// selector's fallback, so both address one rotation state.
+	providerEqual := NewProviderEqualSelector()
 	manager := &Manager{
 		store:                 store,
 		authLoadGate:          semaphore.NewWeighted(math.MaxInt64),
 		executors:             make(map[string]ProviderExecutor),
 		selector:              selector,
-		mixedSelector:         newMixedSelectorFor(selector),
+		mixedSelector:         newMixedSelectorFor(selector, providerEqual),
+		providerEqualSelector: providerEqual,
 		hook:                  hook,
 		auths:                 make(map[string]*Auth),
 		authEpochs:            make(map[string]uint64),
