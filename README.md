@@ -147,6 +147,70 @@ PackyCode provides special discounts for our software users: register using <a h
 
 CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
 
+## Fork configuration
+
+The repository ships [config.yaml](config.yaml), ready to start on
+`127.0.0.1:8318` with the fork's session-sticky defaults and no credentials.
+It carries the Ollama Cloud, OpenRouter and Vercel AI Gateway entries and model
+pins from the [compatible-provider guide introduced by PR #11](https://github.com/vifar/CLIProxyAPI/blob/e6268a0a3edeec5e12f28b8ebd4ed4ab4a8d1394/docs/compatible-providers.md).
+That guide owns the provider reference; this section explains starting the fork.
+The root file uses static model pins; it does not query provider catalogs or
+establish live model availability. The guide's live model refresh and
+compatible-provider `excluded-models` extension are part of
+[pending PR #8](https://github.com/vifar/CLIProxyAPI/pull/8).
+
+Start from the repository root with `go run ./cmd/server --config config.yaml`.
+The providers start **disabled**, with empty `api-key-entries`; upstream requests
+need your own credentials. For a deployment, copy the file outside the checkout,
+for example to `~/.config/cliproxyapi/config.yaml` (create the directory first).
+In that private copy, add `api-key-entries` containing `api-key` for each provider
+you use, then set that provider's `disabled: false`. Several entries give that
+provider several credentials. Run with
+`go run ./cmd/server --config ~/.config/cliproxyapi/config.yaml`.
+Keep credentials out of the tracked root file. OAuth sign-ins use the separate
+`auth-dir`; they do not supply API keys to the compatible-provider rows.
+Client API keys are empty and management is disabled until a secret is set;
+keep the shipped loopback binding for local use.
+
+The shipped defaults and an excerpt of the native OAuth exclusions are:
+
+```yaml
+routing:
+  strategy: round-robin
+  session-affinity: true
+  session-affinity-ttl: 1h
+
+oauth-excluded-models:
+  claude:
+    - claude-haiku-4-5
+  codex:
+    - gpt-4o-mini
+```
+
+`routing.strategy: round-robin` uses the provider-equal selection policy in the
+[routing guide](docs/routing/provider-equal-mixed-round-robin.md).
+`routing.session-affinity: true` keeps an identified session bound to its
+provider and credential while that credential remains eligible. Unavailability
+uses the existing retry and rebinding policy.
+`routing.session-affinity-ttl: 1h` retains that binding for one hour of inactivity;
+using the binding refreshes its TTL. The duration accepts Go duration strings.
+These are the **shipped file's defaults**: omitting the affinity setting from
+another configuration leaves it off.
+
+Provider-set scoping is supplied by
+[pending PR #4](https://github.com/vifar/CLIProxyAPI/pull/4); when it lands, these
+same settings apply within each provider-set scope. The routing guide owns the
+current binding scopes and failover rules.
+
+Use `oauth-excluded-models` directly for OAuth/file-backed model exclusions;
+`"*"` excludes all models covered by a list. For per-credential overrides, see
+the OAuth exclusion rules in [config.example.yaml](config.example.yaml).
+There is no app-side inclusion-list inversion in this fork. Unknown YAML keys
+can be ignored by the loader, so spelling an inclusion key does not enable it.
+These exclusions do not filter the compatible API-key providers; their pinned
+models are configured in `openai-compatibility`.
+[config.example.yaml](config.example.yaml) remains the full upstream reference.
+
 ## Management API
 
 see [MANAGEMENT_API.md](https://help.router-for.me/management/api)

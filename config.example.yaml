@@ -1,5 +1,6 @@
 # Configuration template using the v8 layout.
-# Copy this file to config.yaml and replace the client keys and any enabled examples.
+# For fork setup, see README.md, Fork configuration.
+# Use this reference in a private deployment copy; replace the client keys and any enabled examples.
 # Optional upstream credentials and request rules remain commented until configured.
 # Existing legacy configuration files and /v0/management requests remain supported.
 # When both spellings of a field are present, the v8 value wins (including false,
