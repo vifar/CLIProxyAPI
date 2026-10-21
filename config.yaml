@@ -1,0 +1,116 @@
+# The fork's credential-free starting configuration. See README.md, Fork configuration.
+# Copy outside this checkout, add your own API keys and enable only those providers.
+# Provider names, endpoints and pinned models follow the compatible-provider guide.
+
+port: 8318
+
+# Local access only. No client or management credentials are shipped.
+host: 127.0.0.1
+
+auth-dir: "~/.cli-proxy-api"
+
+debug: false
+
+logging-to-file: false
+
+usage-statistics-enabled: true
+
+# Additional credential retry rounds after the first round exhausts its eligible
+# credentials.
+request-retry: 3
+
+# Session-sticky round robin.
+#
+# A session stays on the provider and credential it was bound to, so a multi-turn
+# conversation keeps its prompt cache warm. When several providers expose the same
+# model name, traffic is split equally between the providers first and then between
+# that provider's credentials, so a provider's share does not scale with its
+# credential count. Bindings expire after one hour of inactivity; unavailable
+# credentials follow the existing failover and rebinding policy.
+routing:
+  strategy: round-robin
+  session-affinity: true
+  session-affinity-ttl: "1h"
+
+quota-exceeded:
+  switch-project: true
+  switch-preview-model: true
+
+# The management API is disabled unless a secret key is set. Keep it on localhost.
+remote-management:
+  allow-remote: false
+  secret-key: ""
+
+# Models a provider must not serve, using upstream's native key. A "*" entry
+# excludes every model for that provider. The fork writes this key directly; it
+# does not use an inclusion list and invert it.
+oauth-excluded-models:
+  claude:
+    - "claude-haiku-4-5"
+    - "claude-haiku-4-5-20251001"
+  codex:
+    - "gpt-4o-mini"
+    - "gpt-4o-2024-05-13"
+    - "gpt-4o-2024-08-06"
+    - "gpt-4o-2024-11-20"
+    - "gpt-4-turbo"
+    - "gpt-4"
+    - "gpt-3.5-turbo"
+
+# OpenAI-compatible providers, with explicit model pins that work on main.
+# Keep disabled until you add credentials in a private deployment copy.
+openai-compatibility:
+  # Ollama Cloud. Add its API key before enabling.
+  - name: ollama-cloud
+    disabled: true
+    base-url: https://ollama.com/v1
+    api-key-entries: []
+    models:
+      # DeepSeek V4 Flash is the stable default alias.
+      - name: deepseek-v4.1-flash
+        alias: deepseek-v4.1-flash
+      - name: deepseek-v4-flash
+        alias: deepseek-v4-flash
+      - name: deepseek-v4-pro
+        alias: deepseek-v4-pro
+      # Kimi K3.
+      - name: kimi-k3
+        alias: kimi-k3
+      - name: kimi-k2.7-code
+        alias: kimi-k2.7-code
+      - name: glm-5.3
+        alias: glm-5.3
+      - name: glm-5.2
+        alias: glm-5.2
+      - name: minimax-m3
+        alias: minimax-m3
+
+  # OpenRouter. Add its API key before enabling.
+  - name: openrouter
+    disabled: true
+    base-url: https://openrouter.ai/api/v1
+    api-key-entries: []
+    models:
+      - name: anthropic/claude-sonnet-4.5
+        alias: claude-sonnet-4.5
+      - name: anthropic/claude-opus-4.5
+        alias: claude-opus-4.5
+      - name: openai/gpt-4.1
+        alias: gpt-4.1
+      - name: google/gemini-2.5-flash
+        alias: gemini-2.5-flash
+      - name: deepseek/deepseek-r1
+        alias: deepseek-r1
+
+  # Vercel AI Gateway. Add its API key before enabling.
+  - name: vercel
+    disabled: true
+    base-url: https://ai-gateway.vercel.sh/v1
+    api-key-entries: []
+    models:
+      - name: anthropic/claude-sonnet-4.5
+        alias: claude-sonnet-4.5
+      - name: openai/gpt-4.1
+        alias: gpt-4.1
+      - name: deepseek/deepseek-v3.1
+        alias: deepseek-v3.1
