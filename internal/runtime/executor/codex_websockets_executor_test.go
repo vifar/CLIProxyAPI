@@ -2865,6 +2865,11 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_NonstreamSessionless(t *testi
 	inWriteHook := make(chan struct{})
 	pongDeliveredDuringWrite := make(chan struct{})
 
+	// The client write must finish before the server closes the connection.
+	// Otherwise the write races the close and fails with "use of closed network
+	// connection", which is what made this test load-sensitive.
+	writeComplete := make(chan struct{})
+
 	testWebsocketWritePayloadHook = func(conn *websocket.Conn) {
 		close(inWriteHook)
 		select {
@@ -2874,6 +2879,8 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_NonstreamSessionless(t *testi
 		}
 	}
 	defer func() { testWebsocketWritePayloadHook = nil }()
+	testWebsocketWriteCompleteHook = func() { close(writeComplete) }
+	defer func() { testWebsocketWriteCompleteHook = nil }()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
@@ -2921,6 +2928,15 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_NonstreamSessionless(t *testi
 
 		respPayload := []byte(`{"type":"response.completed","response":{"id":"resp-1","status":"completed","output":[]}}`)
 		_ = conn.WriteMessage(websocket.TextMessage, respPayload)
+
+		// The connection is closed when this handler returns, so the client write
+		// must have finished first. Otherwise the write races the close and fails
+		// with "use of closed network connection".
+		select {
+		case <-writeComplete:
+		case <-time.After(10 * time.Second):
+			t.Errorf("timed out waiting for the client write to complete")
+		}
 	}))
 	defer server.Close()
 
