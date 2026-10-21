@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -2050,8 +2051,11 @@ func TestSessionCache_GetAndRefresh(t *testing.T) {
 	cache := NewSessionCache(ttl)
 	defer cache.Stop()
 
-	now := time.Now()
-	cache.now = func() time.Time { return now }
+	// The clock is shared with the cache's cleanup goroutine, so it is
+	// accessed atomically.
+	var now atomic.Int64
+	now.Store(time.Now().UnixNano())
+	cache.SetClock(func() time.Time { return time.Unix(0, now.Load()) })
 
 	cache.Set("session1", "auth1")
 
@@ -2062,7 +2066,7 @@ func TestSessionCache_GetAndRefresh(t *testing.T) {
 	}
 
 	// Wait half TTL and access again (should refresh)
-	now = now.Add(ttl / 2)
+	now.Add(int64(ttl / 2))
 	got, ok = cache.GetAndRefresh("session1")
 	if !ok || got != "auth1" {
 		t.Fatalf("GetAndRefresh() after half the TTL = %q, %v, want auth1, true", got, ok)
@@ -2071,14 +2075,14 @@ func TestSessionCache_GetAndRefresh(t *testing.T) {
 	// Wait another half TTL (a full TTL from the original, but the TTL was
 	// refreshed at the access above).
 	// Entry should still be valid because TTL was refreshed
-	now = now.Add(ttl / 2)
+	now.Add(int64(ttl / 2))
 	got, ok = cache.GetAndRefresh("session1")
 	if !ok || got != "auth1" {
 		t.Fatalf("GetAndRefresh() after refresh = %q, %v, want auth1, true (TTL should have been refreshed)", got, ok)
 	}
 
 	// Now wait full TTL without access
-	now = now.Add(ttl)
+	now.Add(int64(ttl))
 	got, ok = cache.GetAndRefresh("session1")
 	if ok {
 		t.Fatalf("GetAndRefresh() after expiry = %q, %v, want '', false", got, ok)

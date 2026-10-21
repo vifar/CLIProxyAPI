@@ -4,6 +4,7 @@ import (
 	"container/list"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -30,17 +31,24 @@ type SessionCache struct {
 	ttl              time.Duration
 	// now returns the current time. It is a field so a test can control the
 	// clock, rather than sleeping and hoping the machine is not loaded.
-	now      func() time.Time
+	//
+	// It is read by the cleanup goroutine and written by a test, so it is
+	// accessed atomically.
+	now      atomic.Pointer[func() time.Time]
 	stopCh   chan struct{}
 	stopOnce sync.Once
 }
 
 // nowTime returns the cache's current time.
 func (c *SessionCache) nowTime() time.Time {
-	if c == nil || c.now == nil {
+	if c == nil {
 		return time.Now()
 	}
-	return c.now()
+	clock := c.now.Load()
+	if clock == nil {
+		return time.Now()
+	}
+	return (*clock)()
 }
 
 // NewSessionCache creates a cache with the specified TTL.
@@ -57,6 +65,7 @@ func NewSessionCacheWithCapacity(ttl time.Duration, maxEntries int) *SessionCach
 	if maxEntries <= 0 {
 		maxEntries = defaultMaxSessionEntries
 	}
+	clock := time.Now
 	c := &SessionCache{
 		entries:          make(map[string]sessionEntry),
 		groups:           make(map[string]sessionEntry),
@@ -64,11 +73,20 @@ func NewSessionCacheWithCapacity(ttl time.Duration, maxEntries int) *SessionCach
 		evictionElements: make(map[string]*list.Element),
 		maxEntries:       maxEntries,
 		ttl:              ttl,
-		now:              time.Now,
 		stopCh:           make(chan struct{}),
 	}
+	c.now.Store(&clock)
 	go c.cleanupLoop()
 	return c
+}
+
+// SetClock replaces the cache's clock. It exists so a test can control time
+// instead of sleeping.
+func (c *SessionCache) SetClock(clock func() time.Time) {
+	if c == nil || clock == nil {
+		return
+	}
+	c.now.Store(&clock)
 }
 
 func (c *SessionCache) ensureInitializedLocked() {
