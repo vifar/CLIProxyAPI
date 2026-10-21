@@ -120,3 +120,34 @@ func TestOpenAICompatibilityExclusionMatchesTheUpstreamName(t *testing.T) {
 		t.Fatalf("models = %+v, want only the non-excluded model", models)
 	}
 }
+
+// TestCompatCatalogOperatorRowsAreKeptApartFromTheLiveList asserts that the
+// operator's configured rows and the live list's contribution stay apart.
+//
+// The augmented configuration is a runtime artifact: a file reload replaces it
+// with the operator's static rows, and a supported configuration write could save
+// it back to the file. The manager therefore keeps the operator's rows, so a
+// discovered model can never become a permanent pin.
+func TestCompatCatalogOperatorRowsAreKeptApartFromTheLiveList(t *testing.T) {
+	t.Parallel()
+
+	service := &Service{cfg: &config.Config{}}
+	manager := newCompatCatalogManager(service)
+
+	operatorRows := []config.OpenAICompatibilityModel{{Name: "operator-model", Alias: "operator-model"}}
+	// The first publication records the operator's rows.
+	if got := manager.operatorRowsFor(0, operatorRows); len(got) != 1 || got[0].Name != "operator-model" {
+		t.Fatalf("operator rows = %+v", got)
+	}
+
+	// A later configuration that already carries a discovered model does not
+	// replace the operator's rows.
+	augmented := []config.OpenAICompatibilityModel{
+		{Name: "operator-model", Alias: "operator-model"},
+		{Name: "discovered", Alias: "discovered"},
+	}
+	got := manager.operatorRowsFor(0, augmented)
+	if len(got) != 1 || got[0].Name != "operator-model" {
+		t.Fatalf("operator rows = %+v, want only the operator's row", got)
+	}
+}
