@@ -42,7 +42,7 @@ type compatUsageBalance struct {
 	ID string `json:"id"`
 	// Amount is the balance value.
 	Amount float64 `json:"amount"`
-	// Currency is the currency code reported by the provider.
+	// Currency is the currency code for the normalized amount.
 	Currency string `json:"currency"`
 }
 
@@ -158,7 +158,7 @@ type compatUsageCredentialKey struct {
 	BaseURL string
 	// KeyNumber is the 1-based position of the key inside its provider entry.
 	KeyNumber int
-	// Key is the API key. It never leaves the process.
+	// Key is sent only to the selected provider endpoint, never in management responses.
 	Key string
 	// ProxyURL is the proxy the credential's own requests use, if any. The meter
 	// request uses it too, so a provider reachable only through its proxy reports
@@ -235,9 +235,9 @@ func compatUsageResolveCredentials(cfg *config.Config) []compatUsageCredentialKe
 	return out
 }
 
-// compatUsageOpaqueID derives a stable, opaque identifier for a credential. The key
-// is mixed into an HMAC, so the identifier cannot be reversed to the key and does
-// not change when the key rotates in place.
+// compatUsageOpaqueID mixes the key into a process-secret HMAC so identifiers do
+// not expose key material. Key rotation changes the identifier and prevents reuse
+// of a cached report for the old key.
 //
 // The provider entry's position in the configuration is part of the identity, so
 // two entries that share a name, a base URL and a key still get distinct
@@ -368,8 +368,7 @@ func compatUsageParseBalances(adapterID string, payload map[string]any) []compat
 	switch adapterID {
 	case "ollama":
 		// The purchased balance is the unexpired purchased credits. The included
-		// balance is reported as a window, because it is a share of the period's
-		// allowance rather than a spend.
+		// balance can also yield a window when the period's allowance is known.
 		if purchased, ok := payload["purchased"].(map[string]any); ok {
 			if amount, okAmount := compatUsageNumber(purchased["balance_usd"]); okAmount {
 				balances = append(balances, compatUsageBalance{ID: "purchased_remaining", Amount: amount, Currency: "USD"})
@@ -615,8 +614,8 @@ func (r *compatUsageReader) fetch(ctx context.Context, credential compatUsageCre
 	return empty
 }
 
-// GetCompatProviderUsage lists the OpenAI-compatible credentials that have a usage
-// meter.
+// GetCompatProviderUsage lists OpenAI-compatible credentials, including entries
+// without a supported usage meter.
 func (h *Handler) GetCompatProviderUsage(c *gin.Context) {
 	if h == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler not initialized"})
