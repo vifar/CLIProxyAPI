@@ -1458,17 +1458,17 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	var failedProvider string
 	var currentBoundAuthID string
 	s.withAffinityState(func(state *sessionAffinityState) {
-		if fallbackKey != "" && !isSubagent && !isFork {
-			failedProvider = s.takeFailedBindingLocked(state, fallbackKey)
-			if failedProvider == "" {
-				failedProvider = s.takeFailedBindingLocked(state, cacheKey)
-			} else {
-				// The primary's record is cleared even when the alias carried the
-				// attribution.
-				s.takeFailedBindingLocked(state, cacheKey)
+		// Every identifier's record is consumed together, so a record cannot
+		// survive under one of them and be picked up later by an unrelated
+		// replacement.
+		for _, key := range failedBindingKeys(cacheKey, fallbackKey) {
+			if fallbackKey != "" && (isSubagent || isFork) {
+				// A parent's session is not an alias of the child's binding.
+				continue
 			}
-		} else {
-			failedProvider = s.takeFailedBindingLocked(state, cacheKey)
+			if failed := s.takeFailedBindingLocked(state, key); failed != "" && failedProvider == "" {
+				failedProvider = failed
+			}
 		}
 		// The binding is re-read under the same lock, so a concurrent retry that
 		// bound a credential in the meantime is seen. Without it, that binding
@@ -1710,17 +1710,20 @@ func (s *SessionAffinitySelector) rememberFailedBindingLocked(state *sessionAffi
 	}
 }
 
-// failedBindingKeyForBinding returns the key a failed binding's record is stored
-// under.
+// failedBindingKeys returns the keys a failed binding's record is stored under.
 //
-// The alias is the identifier that does not change when the primary identifier
-// does, so the record is keyed by it. With no alias the primary identifier is
-// the binding's only name.
-func failedBindingKeyForBinding(cacheKey, fallbackKey string) string {
-	if fallbackKey != "" {
-		return fallbackKey
+// The record is stored under every identifier that names the binding, and it is
+// consumed under the same set. The primary identifier can change between two
+// requests for the same conversation, so a record under one identifier only would
+// survive the change.
+//
+// The alias leads, because it is the identifier that does not change. With no
+// alias the primary identifier is the binding's only name.
+func failedBindingKeys(cacheKey, fallbackKey string) []string {
+	if fallbackKey != "" && fallbackKey != cacheKey {
+		return []string{fallbackKey, cacheKey}
 	}
-	return cacheKey
+	return []string{cacheKey}
 }
 
 // lcpFailedBindingKey is the key an LCP sequence's failure is recorded under.
@@ -1940,27 +1943,31 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 	// The matched credential has left the available candidates, so its provider
 	// cannot be recovered from them. The selector remembers the provider a bound
 	// credential belongs to.
-	replacedProvider := ""
-	if preservedAuthID == "" {
-		if match, ok := s.matcher.MatchFingerprintsWithContext(namespace, fingerprints, tailFingerprints, envDigest, minPrefixLength); ok {
-			// A fork creates a separate binding and leaves its parent intact, so
-			// the parent is not replaced. A compaction extends the sequence it
-			// matched, so that one is.
-			if !match.IsFork {
-				replacedProvider = s.boundProviderFor(match.AuthID, available)
-			}
-		}
-	}
-	// The attribution is consumed and the sequence bound as one step, under the
-	// affinity state's lock.
+	// The match, the attribution consumption and the binding are one step, under
+	// the affinity state's lock.
 	//
 	// Two concurrent retries could both observe a miss. The first consumed the
 	// attribution and paused, the second consumed nothing and bound a sequence as
 	// a creation, and the first then bound another one and reported the
-	// replacement.
+	// replacement. The matched sequence is read inside the same step, so a
+	// concurrent retry's binding is seen rather than overwritten.
 	var lcpFailedProvider string
+	var replacedProvider string
 	var bindRes cliproxysession.MerklePrefixBindResult
 	s.withAffinityState(func(state *sessionAffinityState) {
+		if preservedAuthID == "" {
+			if match, ok := s.matcher.MatchFingerprintsWithContext(namespace, fingerprints, tailFingerprints, envDigest, minPrefixLength); ok {
+				// A fork creates a separate binding and leaves its parent intact,
+				// so the parent is not replaced. A compaction extends the
+				// sequence it matched, so that one is.
+				if !match.IsFork {
+					replacedProvider = state.boundProviders[match.AuthID]
+					if replacedProvider == "" {
+						replacedProvider = s.routingProviderKeyForAuthID(match.AuthID, available)
+					}
+				}
+			}
+		}
 		lcpFailedProvider = s.takeFailedBindingLocked(state, lcpFailedBindingKey(namespace, cliproxysession.SequenceIdentity(fingerprints)))
 		bindRes = s.matcher.BindFingerprintsWithContext(namespace, fingerprints, tailFingerprints, envDigest, minPrefixLength, bindAuthID)
 	})
@@ -2483,10 +2490,15 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 				return
 			}
 			s.rememberBoundProviderLocked(state, removedAuthID, providerKey)
-			// The record is stored under the identifier that names the binding
-			// stably, so a retry that arrives with a different primary identifier
-			// still finds it.
-			s.rememberFailedBindingLocked(state, failedBindingKeyForBinding(cacheKey, fallbackKey), providerKey)
+			// The record is stored under every identifier that names the binding.
+			// The primary identifier can change between two requests for the
+			// same conversation, so a record under one identifier only would
+			// survive the change and be picked up later by an unrelated
+			// replacement, which would then be reported against the wrong
+			// provider.
+			for _, key := range failedBindingKeys(cacheKey, fallbackKey) {
+				s.rememberFailedBindingLocked(state, key, providerKey)
+			}
 		}
 		if _, okRemoved := s.cache.CompareAndDeleteReporting(cacheKey, res.AuthID, publishAttribution); okRemoved {
 			_ = okRemoved
