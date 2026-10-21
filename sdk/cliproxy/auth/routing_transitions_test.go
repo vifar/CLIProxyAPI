@@ -584,3 +584,78 @@ func TestSessionAffinityConsumesTheAliasFailureWithThePrimary(t *testing.T) {
 		t.Fatalf("failed provider = %q, want provider-a", got)
 	}
 }
+
+// TestSessionAffinityFailureRecordSurvivesAPrimaryChange asserts that a failed
+// binding's record is found when the request carries a different primary
+// identifier for the same binding.
+//
+// The alias is the identifier that does not change, so the record is keyed by
+// it. A record left under only the primary identifier would survive a change of
+// the primary and be picked up later by an unrelated replacement, which would
+// then be reported against the wrong provider.
+func TestSessionAffinityFailureRecordSurvivesAPrimaryChange(t *testing.T) {
+	t.Parallel()
+
+	affinity := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Hour,
+	})
+	t.Cleanup(affinity.Stop)
+
+	const primaryKey = "mixed::p1::model-1"
+	const aliasKey = "mixed::c1::model-1"
+
+	// The binding fails, and the record is stored under both identifiers.
+	affinity.rememberFailedBindingForBinding(primaryKey, aliasKey, "provider-a")
+
+	// The retry arrives with a different primary identifier and the same alias.
+	if got := affinity.takeFailedBindingForBinding("mixed::p2::model-1", aliasKey); got != "provider-a" {
+		t.Fatalf("failed provider = %q, want provider-a", got)
+	}
+
+	// The primary's record was never stored, so it cannot survive under the
+	// other identifier.
+	if got := affinity.takeFailedBinding(primaryKey); got != "" {
+		t.Fatalf("failed provider = %q, want no record under the primary", got)
+	}
+}
+
+// TestSessionAffinityFailureRecordIsKeyedByTheAlias asserts that the alias
+// leads the record's identifiers.
+//
+// The primary identifier can change between two requests for the same
+// conversation, while the alias does not, so the alias has to be the identifier
+// the record is found by.
+func TestSessionAffinityFailureRecordIsKeyedByTheAlias(t *testing.T) {
+	t.Parallel()
+
+	affinity := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Hour,
+	})
+	t.Cleanup(affinity.Stop)
+
+	const primaryKey = "mixed::p1::model-1"
+	const aliasKey = "mixed::c1::model-1"
+
+	affinity.rememberFailedBindingForBinding(primaryKey, aliasKey, "provider-a")
+
+	// The record is found by the alias, and only by the alias: the primary
+	// identifier can change, so a record under it would not be the same
+	// binding's record.
+	if got := affinity.takeFailedBinding(aliasKey); got != "provider-a" {
+		t.Fatalf("failed provider = %q, want provider-a", got)
+	}
+	if got := affinity.takeFailedBinding(primaryKey); got != "" {
+		t.Fatalf("failed provider = %q, want no record under the primary", got)
+	}
+	// And it is consumed as a whole, so nothing survives under the other
+	// identifier.
+	affinity.rememberFailedBindingForBinding(primaryKey, aliasKey, "provider-a")
+	if got := affinity.takeFailedBindingForBinding(primaryKey, aliasKey); got != "provider-a" {
+		t.Fatalf("failed provider = %q, want provider-a", got)
+	}
+	if got := affinity.takeFailedBinding(primaryKey); got != "" {
+		t.Fatalf("failed provider = %q, want the record to be cleared", got)
+	}
+}

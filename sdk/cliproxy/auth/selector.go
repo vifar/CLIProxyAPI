@@ -1406,16 +1406,15 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	// identifier is its parent's session, and a fork's is its parent's session
 	// too, but those are separate bindings with their own affinity: a failure
 	// recorded for the parent is not a failure of the subagent's binding.
-	failedProvider := s.takeFailedBinding(cacheKey)
+	// The primary and the alias point at the same binding, so both records
+	// describe the same failure. They are consumed together, so a stale record
+	// under one of them cannot be picked up later by an unrelated replacement
+	// and reported against the wrong provider.
+	var failedProvider string
 	if fallbackKey != "" && !isSubagent && !isFork {
-		// The primary and the alias point at the same binding, so both records
-		// describe the same failure. They are consumed together, so a stale
-		// record under the alias cannot be picked up later by an unrelated
-		// replacement and reported against the wrong provider.
-		aliasProvider := s.takeFailedBinding(fallbackKey)
-		if failedProvider == "" {
-			failedProvider = aliasProvider
-		}
+		failedProvider = s.takeFailedBindingForBinding(cacheKey, fallbackKey)
+	} else {
+		failedProvider = s.takeFailedBinding(cacheKey)
 	}
 	if failedProvider != "" {
 		// The credential this session was bound to failed, so this is the
@@ -1602,6 +1601,49 @@ func lcpFailedBindingKey(namespace, sequenceIdentity string) string {
 	return namespace + "\x00" + sequenceIdentity
 }
 
+// rememberFailedBindingForBinding records a failed binding under the identifier
+// that names it stably.
+//
+// A binding can be addressed by more than one identifier: a request may carry
+// a different primary identifier and the same alias. The alias is the
+// identifier that does not change, so the record is keyed by it. A record under
+// the primary identifier alone would survive a change of the primary and be
+// picked up later by an unrelated replacement, which would then be reported
+// against the wrong provider.
+//
+// When there is no alias, the primary identifier is the only name the binding
+// has, so the record is keyed by it.
+func (s *SessionAffinitySelector) rememberFailedBindingForBinding(cacheKey, fallbackKey, providerKey string) {
+	if fallbackKey != "" {
+		s.rememberFailedBinding(fallbackKey, providerKey)
+		return
+	}
+	s.rememberFailedBinding(cacheKey, providerKey)
+}
+
+// takeFailedBindingForBinding returns and clears the provider recorded for a
+// failed binding, under every identifier that names it.
+//
+// The alias is read first, because it is the identifier that does not change
+// when the primary identifier does. Every identifier's record is cleared, so a
+// record cannot survive under one of them and be picked up later by an
+// unrelated replacement.
+func (s *SessionAffinitySelector) takeFailedBindingForBinding(cacheKey, fallbackKey string) string {
+	provider := ""
+	if fallbackKey != "" {
+		provider = s.takeFailedBinding(fallbackKey)
+	}
+	if provider == "" {
+		provider = s.takeFailedBinding(cacheKey)
+	}
+	if fallbackKey != "" {
+		// The primary's record is cleared even when the alias carried the
+		// attribution.
+		s.takeFailedBinding(cacheKey)
+	}
+	return provider
+}
+
 // takeFailedBinding returns and clears the provider recorded for a failed binding.
 func (s *SessionAffinitySelector) takeFailedBinding(bindingKey string) string {
 	if s == nil || bindingKey == "" {
@@ -1769,7 +1811,12 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 	replacedProvider := ""
 	if preservedAuthID == "" {
 		if match, ok := s.matcher.MatchFingerprintsWithContext(namespace, fingerprints, tailFingerprints, envDigest, minPrefixLength); ok {
-			replacedProvider = s.boundProviderFor(match.AuthID, available)
+			// A fork creates a separate binding and leaves its parent intact, so
+			// the parent is not replaced. A compaction extends the sequence it
+			// matched, so that one is.
+			if !match.IsFork {
+				replacedProvider = s.boundProviderFor(match.AuthID, available)
+			}
 		}
 	}
 	if bindRes := s.matcher.BindFingerprintsWithContext(namespace, fingerprints, tailFingerprints, envDigest, minPrefixLength, bindAuthID); bindRes.SessionID != "" {
@@ -2175,6 +2222,22 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 					// removal is confirmed. A late failure from a credential the
 					// conversation has already rebound away from must not be
 					// recorded as a replacement.
+					//
+					// The attribution is published before the removal, so a
+					// concurrent request cannot observe the removal and bind a
+					// different credential before the attribution exists. If the
+					// removal does not happen after all, the attribution is
+					// withdrawn again, so it cannot describe a binding that is
+					// still in place.
+					sequenceKey := lcpFailedBindingKey(namespace, sequenceIdentity)
+					providerKey := ""
+					if sequenceIdentity != "" {
+						providerKey = s.boundProviderFor(res.AuthID, nil)
+					}
+					published := providerKey != ""
+					if published {
+						s.rememberFailedBinding(sequenceKey, providerKey)
+					}
 					removed := s.matcher.RemoveFingerprintsBefore(namespace, fingerprints, res.AuthID, generation)
 					if !removed && res.Options.Metadata != nil {
 						isFork, _ := res.Options.Metadata[cliproxyexecutor.IsForkMetadataKey].(bool)
@@ -2182,10 +2245,10 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 							removed = s.matcher.RemoveSessionBefore(namespace, lcpSessionID, res.AuthID, generation)
 						}
 					}
-					if removed && sequenceIdentity != "" {
-						if providerKey := s.boundProviderFor(res.AuthID, nil); providerKey != "" {
-							s.rememberFailedBinding(lcpFailedBindingKey(namespace, sequenceIdentity), providerKey)
-						}
+					if published && !removed {
+						// The sequence was not removed, so the binding is still in
+						// place and the attribution is withdrawn.
+						s.takeFailedBinding(sequenceKey)
 					}
 				}
 			}
@@ -2236,27 +2299,31 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 	// can be reported as the replacement it is, rather than as a new binding. The
 	// record is keyed by the binding's own key, so a failure for one model cannot
 	// be consumed by a request for another.
-	if boundAuthID, okBound := s.cache.Get(cacheKey); okBound && boundAuthID == res.AuthID {
-		if s.cache.CompareAndDelete(cacheKey, res.AuthID) {
-			if providerKey := s.boundProviderFor(boundAuthID, nil); providerKey != "" {
-				s.rememberBoundProvider(boundAuthID, providerKey)
-				s.rememberFailedBinding(cacheKey, providerKey)
-			}
+	// The binding is removed only if it still points at the credential that failed.
+	// A late failure from a credential the session has already rebound away from
+	// must not be recorded as a replacement, so the attribution is published only
+	// after the removal is confirmed.
+	//
+	// The removal and the report of what was removed happen under one lock, so
+	// a concurrent request cannot observe the removal before the attribution is
+	// published. Otherwise it could bind a different credential in between, and
+	// the attribution would describe a binding that no longer exists.
+	if removedAuthID, okRemoved := s.cache.CompareAndDeleteReturning(cacheKey, res.AuthID); okRemoved {
+		if providerKey := s.boundProviderFor(removedAuthID, nil); providerKey != "" {
+			s.rememberBoundProvider(removedAuthID, providerKey)
+			// The record is stored under every identifier of the binding, so
+			// a retry that arrives with a different primary identifier still
+			// finds it through the alias that names the same binding.
+			s.rememberFailedBindingForBinding(cacheKey, fallbackKey, providerKey)
 		}
-	} else {
-		s.cache.CompareAndDelete(cacheKey, res.AuthID)
 	}
 	if fallbackKey != "" {
 		// The fallback alias points at the same binding, so it carries the same
 		// attribution. A retry through the alias finds it.
-		if boundAuthID, okBound := s.cache.Get(fallbackKey); okBound && boundAuthID == res.AuthID {
-			if s.cache.CompareAndDelete(fallbackKey, res.AuthID) {
-				if providerKey := s.boundProviderFor(boundAuthID, nil); providerKey != "" {
-					s.rememberFailedBinding(fallbackKey, providerKey)
-				}
+		if removedAuthID, okRemoved := s.cache.CompareAndDeleteReturning(fallbackKey, res.AuthID); okRemoved {
+			if providerKey := s.boundProviderFor(removedAuthID, nil); providerKey != "" {
+				s.rememberFailedBindingForBinding(cacheKey, fallbackKey, providerKey)
 			}
-		} else {
-			s.cache.CompareAndDelete(fallbackKey, res.AuthID)
 		}
 	}
 }
