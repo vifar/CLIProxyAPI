@@ -163,14 +163,21 @@ func TestCompatCatalogDiscoversAnUnnamedProvider(t *testing.T) {
 // part of the global OAuth exclusions. A registration that captured one
 // configuration must not publish under a later one, or an excluded model would
 // be republished.
+//
+// The test attempts a publication, rather than comparing the fence's summary
+// with the helper that built it: a comparison would pass even if the
+// publication check were removed.
 func TestModelRegistrationFenceDetectsAProviderExclusionChange(t *testing.T) {
 	t.Parallel()
 
 	auth := &coreauth.Auth{
-		ID:         "compat-fence-auth",
-		Provider:   "openai-compatibility",
-		Status:     coreauth.StatusActive,
-		Attributes: map[string]string{"compat_name": "ollama-cloud", "config_index": "0"},
+		ID:       "compat-fence-auth",
+		Provider: "openai-compatibility",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"compat_name":  "ollama-cloud",
+			"config_index": "0",
+		},
 	}
 
 	cfg := &config.Config{
@@ -184,16 +191,16 @@ func TestModelRegistrationFenceDetectsAProviderExclusionChange(t *testing.T) {
 	}
 	fence := newModelRegistrationFence(auth, cfg)
 
-	// A reload that changes the provider's own exclusions is detected.
-	cfg.OpenAICompatibility[0].ExcludedModels = []string{"other-model"}
-	if fence.compatExclusions == compatExcludedModelsSummaryForConfig(cfg, auth) {
-		t.Fatal("the fence must not match a changed exclusion list")
+	// The registration is published under the configuration it captured.
+	service := &Service{cfg: cfg}
+	if !fence.publishIfCurrent(service, auth.ID, func() bool { return true }) {
+		t.Fatal("the registration must publish under the configuration it captured")
 	}
 
-	// A reload that leaves it unchanged is not.
-	cfg.OpenAICompatibility[0].ExcludedModels = []string{"excluded-model"}
-	if fence.compatExclusions != compatExcludedModelsSummaryForConfig(cfg, auth) {
-		t.Fatal("the fence must match an unchanged exclusion list")
+	// A reload that changes the provider's own exclusions must stop it.
+	cfg.OpenAICompatibility[0].ExcludedModels = []string{"other-model"}
+	if fence.publishIfCurrent(service, auth.ID, func() bool { return true }) {
+		t.Fatal("the registration must not publish after the exclusion list changed")
 	}
 }
 
@@ -204,6 +211,9 @@ func TestModelRegistrationFenceDetectsAProviderExclusionChange(t *testing.T) {
 // checks for the global OAuth exclusions are restricted to the credentials those
 // apply to. The provider's own excluded-models list applies to every credential,
 // so its check must not be nested under that restriction.
+//
+// The test attempts a publication, so it fails if the check is skipped for an
+// API-key credential.
 func TestModelRegistrationFenceAppliesToAnAPIKeyCredential(t *testing.T) {
 	t.Parallel()
 
@@ -231,13 +241,16 @@ func TestModelRegistrationFenceAppliesToAnAPIKeyCredential(t *testing.T) {
 		},
 	}
 	fence := newModelRegistrationFence(auth, cfg)
-	if fence.compatExclusions == "" {
-		t.Fatal("the fence must carry the provider's own exclusion list")
+	service := &Service{cfg: cfg}
+
+	if !fence.publishIfCurrent(service, auth.ID, func() bool { return true }) {
+		t.Fatal("the registration must publish under the configuration it captured")
 	}
 
-	// A reload that changes the list is detected for this credential too.
+	// A reload that changes the provider's own exclusions must stop it, for an
+	// API-key credential as well.
 	cfg.OpenAICompatibility[0].ExcludedModels = []string{"other-model"}
-	if fence.compatExclusions == compatExcludedModelsSummaryForConfig(cfg, auth) {
-		t.Fatal("the fence must not match a changed exclusion list for an API-key credential")
+	if fence.publishIfCurrent(service, auth.ID, func() bool { return true }) {
+		t.Fatal("the registration must not publish after the exclusion list changed")
 	}
 }

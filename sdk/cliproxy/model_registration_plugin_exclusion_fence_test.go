@@ -101,3 +101,66 @@ func TestModelRegistrationPluginExclusionSources(t *testing.T) {
 		})
 	}
 }
+
+// TestModelRegistrationPluginProviderExclusions asserts that a compatible
+// provider's own exclusions filter the models a plugin publishes for it.
+//
+// The plugin path returns before the configured rows are filtered, so without the
+// provider's own list reaching it an excluded model would still be published and
+// a request could route to it.
+func TestModelRegistrationPluginProviderExclusions(t *testing.T) {
+	const pluginID = "provider-exclusion-fixture"
+	// A compatible credential is registered under the compatible provider key.
+	const provider = "openai-compatibility"
+
+	host := pluginhost.New()
+	modelProvider := &exclusionFenceModelProvider{
+		provider: provider,
+		onModels: func() pluginapi.ModelResponse {
+			// The plugin publishes for the compatible provider, so its models are
+			// published onto the compatible credential.
+			return pluginapi.ModelResponse{Provider: provider, Models: []pluginapi.ModelInfo{{ID: "m"}, {ID: "n"}}}
+		},
+	}
+	host.RegisterPluginForTest(pluginID, pluginapi.Plugin{Capabilities: pluginapi.Capabilities{ModelProvider: modelProvider}})
+	host.RegisterModels(t.Context(), registry.GetGlobalRegistry())
+
+	cfg := &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{
+			{
+				Name:           "compat-fixture",
+				BaseURL:        "https://compat.example.com/v1",
+				ExcludedModels: []string{"m"},
+				APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+					{APIKey: "test-key"},
+				},
+			},
+		},
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	service := &Service{cfg: cfg, coreManager: manager, pluginHost: host}
+
+	reg := GlobalModelRegistry()
+	auth := &coreauth.Auth{
+		ID:       t.Name(),
+		Provider: "openai-compatibility",
+		Attributes: map[string]string{
+			"compat_name":  "compat-fixture",
+			"config_index": "0",
+		},
+	}
+	registered, errRegister := manager.Register(t.Context(), auth)
+	if errRegister != nil {
+		t.Fatal(errRegister)
+	}
+	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+
+	service.registerModelsForAuth(t.Context(), registered)
+
+	if reg.ClientSupportsModel(auth.ID, "m") {
+		t.Fatalf("the excluded model was published: %v", reg.GetModelsForClient(auth.ID))
+	}
+	if !reg.ClientSupportsModel(auth.ID, "n") {
+		t.Fatalf("the allowed model was not published: %v", reg.GetModelsForClient(auth.ID))
+	}
+}

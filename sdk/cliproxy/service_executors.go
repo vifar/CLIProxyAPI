@@ -576,6 +576,17 @@ func (s *Service) tryRegisterPluginModelsForAuthWithConfig(ctx context.Context, 
 // result means the computation was superseded and the latest auth must be
 // reconciled by the completion pass (issue #6718).
 func (s *Service) tryRegisterPluginModelsForAuthWithConfigFenced(ctx context.Context, cfg *config.Config, a *coreauth.Auth, fence modelRegistrationFence, provider, authKind string, excluded []string) (bool, bool) {
+	return s.tryRegisterPluginModelsForAuthWithProviderExclusions(ctx, cfg, a, fence, provider, authKind, excluded, nil)
+}
+
+// tryRegisterPluginModelsForAuthWithProviderExclusions registers a plugin's
+// models for a credential.
+//
+// The provider's own exclusions always apply, on top of the global OAuth
+// exclusions and the credential's own. They are a separate list because the
+// global exclusions take priority over the supplied fallback, and a compatible
+// provider's own list must not be dropped by that precedence.
+func (s *Service) tryRegisterPluginModelsForAuthWithProviderExclusions(ctx context.Context, cfg *config.Config, a *coreauth.Auth, fence modelRegistrationFence, provider, authKind string, excluded, providerExcluded []string) (bool, bool) {
 	if s == nil || s.pluginHost == nil || a == nil {
 		return false, true
 	}
@@ -649,7 +660,7 @@ func (s *Service) tryRegisterPluginModelsForAuthWithConfigFenced(ctx context.Con
 	activeAuthKind := activeAuth.AuthKind()
 	activeExcluded := oauthExcludedModelsForConfig(cfg, providerKey, activeAuthKind)
 	fallbackExclusionProvider := ""
-	if a == activeAuth && len(activeExcluded) == 0 {
+	if len(activeExcluded) == 0 {
 		activeExcluded = excluded
 		fallbackExclusionProvider = strings.ToLower(strings.TrimSpace(provider))
 	}
@@ -663,6 +674,9 @@ func (s *Service) tryRegisterPluginModelsForAuthWithConfigFenced(ctx context.Con
 		return true, true
 	}
 	models := applyExcludedModels(result.Models, activeExcluded)
+	// The provider's own exclusions apply whatever the other sources resolved
+	// to, so an excluded model is never published.
+	models = applyExcludedModels(models, providerExcluded)
 	models = applyOAuthModelAliasForAuth(cfg, providerKey, activeAuthKind, activeAuth.Attributes, models)
 	publicationFence := fence
 	if pluginAuthCommitted {
