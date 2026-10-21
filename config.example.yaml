@@ -146,6 +146,7 @@ access:
 #     staging-retention: 1m
 
 # Routing strategy for selecting credentials when multiple match.
+# Mixed-provider round-robin semantics: docs/routing/provider-equal-mixed-round-robin.md.
 routing:
   strategy: "round-robin" # round-robin (default), weighted-round-robin, fill-first
   # weighted-round-robin uses each credential's integer weight (default 1, maximum 1,000,000).
@@ -326,7 +327,8 @@ client:
     # Legacy provider paths migrate here; this path wins conflicts, including explicit false.
     optimize-multi-agent-v2: false
     # Cache upstream web search results per session so replayed Codex web_search_call items
-    # that omit results still retain search results in later turns.
+    # that omit results still retain search results in later turns. Claude results are also
+    # scoped to the selected credential, so switching credentials does not reuse its cache.
     web-search-result-cache:
       enabled: false
       ttl: "24h"
@@ -455,13 +457,17 @@ upstream:
     #
     # Shared Claude CLI fingerprint defaults. Update only after measuring a new Claude Code release.
     # Unconfirmed clients use this CLI baseline. Verified native Claude Code CLI, sdk-cli,
-    # and VSCode requests preserve their measured entrypoint when the Claude Code version is a
+    # sdk-ts, and VSCode requests preserve their measured entrypoint when the Claude Code version is a
     # patch release in the configured major/minor line at or above this baseline. Older versions
     # and newer major/minor lines fall back to the baseline until measured. In legacy mode,
-    # timeout is a fallback and
-    # verified native OS/arch values remain client-supplied. When stabilize-device-profile is
+    # verified clients may keep SDK package and runtime versions at or above the built-in
+    # defaults; explicit package-version/runtime-version overrides require exact matches.
+    # Timeout is a fallback, and verified native OS/arch values remain client-supplied.
+    # When stabilize-device-profile is
     # enabled, OS/arch are pinned to the values below and cached profiles remain constrained to
     # the same exact software baseline rather than learning newer client versions.
+    # Explicit cloak mode "never" on a CLI profile preserves recognized Claude Code request
+    # shapes through legacy device headers, bypassing pinning and configured software/OS/arch defaults.
     # header-defaults:
     #   user-agent: "claude-cli/2.1.280 (external, cli)"
     #   package-version: "0.112.1"

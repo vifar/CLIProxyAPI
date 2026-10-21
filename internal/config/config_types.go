@@ -152,10 +152,8 @@ func (c ClaudeConfig) SessionDatePinRetention() time.Duration {
 }
 
 // ClaudeHeaderDefaults configures the measured Claude Code software baseline.
-// Verified native requests preserve their entrypoint and software shape only when their
-// Claude Code, package, and runtime versions exactly match this baseline; unmeasured
-// versions use the configured values. Timeout remains a fallback. Stabilized profiles
-// also pin OS and Arch and never learn newer software versions automatically.
+// See upstream.claude.header-defaults in config.example.yaml for version compatibility,
+// header precedence, and device-profile stabilization behavior.
 // AnthropicBetaStrip and AnthropicBetaAppend are exact-name operator overrides applied
 // to the final Anthropic-Beta set; InjectDiagnostics and ClientRequestID tune the
 // first-party Claude Code CLI request shape.
