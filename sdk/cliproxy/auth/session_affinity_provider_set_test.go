@@ -257,7 +257,7 @@ func TestSessionAffinityScopedNamespaceSuffixMatching(t *testing.T) {
 	cache.Set("other[a,b]::header:s1::model-1", "auth-4")
 	cache.Set("mixed[a,b]::header:s1::model-2", "auth-5")
 
-	found := cache.GetByScopeSuffix("mixed", "::header:s1::model-1")
+	found := cache.GetByScopeSuffixes("mixed", []string{"::header:s1::model-1"})
 	if len(found) != 2 {
 		t.Fatalf("found = %v, want the two mixed bindings", found)
 	}
@@ -306,5 +306,40 @@ func TestLCPAffinityNamespaceCarriesTheProviderSetScope(t *testing.T) {
 	}
 	if callerScope != "caller-1" {
 		t.Fatalf("caller scope = %q, want caller-1", callerScope)
+	}
+}
+
+// TestSessionAffinityScopedLookupMatchesEveryCandidateSuffix asserts that the
+// batched scoped lookup finds the bindings of every candidate suffix.
+//
+// The suffixes are matched in one pass, so the batched result must be the union of
+// the individual suffix results.
+func TestSessionAffinityScopedLookupMatchesEveryCandidateSuffix(t *testing.T) {
+	t.Parallel()
+
+	cache := NewSessionCache(time.Hour)
+	defer cache.Stop()
+
+	cache.Set("mixed[a,b]::header:s1::model-1", "auth-1")
+	cache.Set("mixed[a,b]::header:s2::model-1", "auth-2")
+	cache.Set("mixed[a,b]::header:s1::model-2", "auth-3")
+	cache.Set("other::header:s1::model-1", "auth-4")
+
+	suffixes := []string{"::header:s1::model-1", "::header:s2::model-1"}
+	found := cache.GetByScopeSuffixes("mixed", suffixes)
+	if len(found) != 2 {
+		t.Fatalf("found = %v, want two bindings", found)
+	}
+	if _, ok := found["auth-1"]; !ok {
+		t.Fatal("the first candidate's binding was not found")
+	}
+	if _, ok := found["auth-2"]; !ok {
+		t.Fatal("the second candidate's binding was not found")
+	}
+	if _, ok := found["auth-3"]; ok {
+		t.Fatal("a binding for another model was found")
+	}
+	if _, ok := found["auth-4"]; ok {
+		t.Fatal("another namespace's binding was found")
 	}
 }

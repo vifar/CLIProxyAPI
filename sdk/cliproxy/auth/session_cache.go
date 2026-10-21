@@ -130,48 +130,37 @@ func (c *SessionCache) GetAndRefresh(sessionID string) (string, bool) {
 	return entry.authID, true
 }
 
-// GetByPrefix returns every live auth ID bound under a key prefix. It is used to
-// observe bindings whose namespace carries a scope suffix, such as a mixed route
-// scoped by the canonical eligible provider set.
-func (c *SessionCache) GetByPrefix(prefix string) map[string]struct{} {
-	if c == nil || prefix == "" {
-		return nil
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.ensureInitializedLocked()
-	now := time.Now()
-	found := make(map[string]struct{})
-	for key, entry := range c.entries {
-		if entry.authID == "" {
-			continue
-		}
-		if !strings.HasPrefix(key, prefix) {
-			continue
-		}
-		if !now.Before(entry.expiresAt) {
-			continue
-		}
-		found[entry.authID] = struct{}{}
-	}
-	return found
-}
-
-// GetByScopeSuffix returns every live auth ID bound under a namespace whose scope
-// may vary, matched on an exact key suffix.
+// GetByScopeSuffixes returns every live auth ID bound under a namespace whose scope
+// may vary, matched on one of several exact key suffixes.
 //
 // A scoped mixed binding is keyed as "<namespace>[<providers>]::<session>::<model>":
 // the provider set comes first and the session and model follow it. Matching the
-// scope as part of a literal prefix would never find those keys, because the
-// scope sits between the namespace and the suffix. This matches the namespace
-// prefix, then the scope, then the exact suffix.
-func (c *SessionCache) GetByScopeSuffix(namespace, suffix string) map[string]struct{} {
-	if c == nil || namespace == "" || suffix == "" {
+// scope as part of a literal prefix would never find those keys, because the scope
+// sits between the namespace and the suffix.
+//
+// The suffixes are matched in one pass under a read lock. A bare session identifier
+// expands into many candidate suffixes, and scanning the cache once per candidate
+// would examine the whole cache many times over while blocking session selection
+// and result updates.
+func (c *SessionCache) GetByScopeSuffixes(namespace string, suffixes []string) map[string]struct{} {
+	if c == nil || namespace == "" || len(suffixes) == 0 {
 		return nil
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.ensureInitializedLocked()
+	wanted := make(map[string]struct{}, len(suffixes))
+	for _, suffix := range suffixes {
+		if suffix != "" {
+			wanted[suffix] = struct{}{}
+		}
+	}
+	if len(wanted) == 0 {
+		return nil
+	}
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.entries == nil {
+		return nil
+	}
 	now := time.Now()
 	found := make(map[string]struct{})
 	for key, entry := range c.entries {
@@ -181,19 +170,27 @@ func (c *SessionCache) GetByScopeSuffix(namespace, suffix string) map[string]str
 		if !now.Before(entry.expiresAt) {
 			continue
 		}
-		if !strings.HasSuffix(key, suffix) {
-			continue
-		}
-		head := strings.TrimSuffix(key, suffix)
-		// The head is the namespace plus its scope: "mixed" or "mixed[a,b]".
-		if head != namespace && !strings.HasPrefix(head, namespace+"[") {
-			continue
-		}
-		if head != namespace {
-			// The scope must be closed, so "mixed[a,b" is not a scoped namespace.
-			if !strings.HasSuffix(head, "]") {
+		matched := false
+		for suffix := range wanted {
+			if !strings.HasSuffix(key, suffix) {
 				continue
 			}
+			head := strings.TrimSuffix(key, suffix)
+			// The head is the namespace plus its scope: "mixed" or "mixed[a,b]".
+			if head != namespace && !strings.HasPrefix(head, namespace+"[") {
+				continue
+			}
+			if head != namespace {
+				// The scope must be closed, so "mixed[a,b" is not a scoped namespace.
+				if !strings.HasSuffix(head, "]") {
+					continue
+				}
+			}
+			matched = true
+			break
+		}
+		if !matched {
+			continue
 		}
 		found[entry.authID] = struct{}{}
 	}

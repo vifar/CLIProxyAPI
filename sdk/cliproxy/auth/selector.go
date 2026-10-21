@@ -1661,18 +1661,25 @@ func (s *SessionAffinitySelector) LookupAffinity(provider, model, sessionID stri
 		// A mixed-route binding is scoped by the canonical eligible provider set, so
 		// the key carries a scope suffix. Observe those bindings too.
 		if candProvider == "mixed" {
+			// A scoped mixed binding is keyed as "mixed[<providers>]::<session>::<model>":
+			// the provider set comes first, then the session and the model. The
+			// scope is therefore matched on its own, and the session and model are
+			// matched as the exact suffix.
+			//
+			// The candidate suffixes are matched in one pass. A bare session
+			// identifier expands into many candidates, and scanning the cache once
+			// per candidate would examine the whole cache many times over while
+			// blocking session selection and result updates.
+			suffixes := make([]string, 0, len(candidates))
 			for _, cand := range candidates {
 				bounded := cliproxysession.BoundSessionIdentity(cand)
-				// A scoped mixed binding is keyed as "mixed[<providers>]::<session>::<model>":
-				// the provider set comes first, then the session and the model. The
-				// scope is therefore matched on its own, and the session and model
-				// are matched as the exact suffix.
-				for authID := range s.cache.GetByScopeSuffix(candProvider, "::"+bounded+"::"+modelKey) {
-					if authFilter != nil && !authFilter(authID) {
-						continue
-					}
-					foundAuths[authID] = struct{}{}
+				suffixes = append(suffixes, "::"+bounded+"::"+modelKey)
+			}
+			for authID := range s.cache.GetByScopeSuffixes(candProvider, suffixes) {
+				if authFilter != nil && !authFilter(authID) {
+					continue
 				}
+				foundAuths[authID] = struct{}{}
 			}
 		}
 	}
