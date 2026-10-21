@@ -28,8 +28,19 @@ type SessionCache struct {
 	evictionElements map[string]*list.Element
 	maxEntries       int
 	ttl              time.Duration
-	stopCh           chan struct{}
-	stopOnce         sync.Once
+	// now returns the current time. It is a field so a test can control the
+	// clock, rather than sleeping and hoping the machine is not loaded.
+	now      func() time.Time
+	stopCh   chan struct{}
+	stopOnce sync.Once
+}
+
+// nowTime returns the cache's current time.
+func (c *SessionCache) nowTime() time.Time {
+	if c == nil || c.now == nil {
+		return time.Now()
+	}
+	return c.now()
 }
 
 // NewSessionCache creates a cache with the specified TTL.
@@ -53,6 +64,7 @@ func NewSessionCacheWithCapacity(ttl time.Duration, maxEntries int) *SessionCach
 		evictionElements: make(map[string]*list.Element),
 		maxEntries:       maxEntries,
 		ttl:              ttl,
+		now:              time.Now,
 		stopCh:           make(chan struct{}),
 	}
 	go c.cleanupLoop()
@@ -81,7 +93,7 @@ func (c *SessionCache) Get(sessionID string) (string, bool) {
 		return "", false
 	}
 	c.mu.RLock()
-	now := time.Now()
+	now := c.nowTime()
 	entry, ok := c.entries[sessionID]
 	if ok && now.Before(entry.expiresAt) {
 		c.mu.RUnlock()
@@ -119,7 +131,7 @@ func (c *SessionCache) GetAndRefresh(sessionID string) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	now := time.Now()
+	now := c.nowTime()
 	if !now.Before(entry.expiresAt) {
 		c.removeAliasGroupLocked(entry)
 		return "", false
@@ -147,7 +159,7 @@ func (c *SessionCache) SetAliases(authID string, sessionIDs ...string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.ensureInitializedLocked()
-	now := time.Now()
+	now := c.nowTime()
 
 	aliases := mergeSessionAliases(nil, sessionIDs...)
 	previousGroups := make([]sessionEntry, 0, len(sessionIDs))
@@ -317,7 +329,7 @@ func (c *SessionCache) Touch(sessionID, expectedAuthID string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.ensureInitializedLocked()
-	now := time.Now()
+	now := c.nowTime()
 	entry, ok := c.entries[sessionID]
 	if !ok || entry.authID != expectedAuthID || !now.Before(entry.expiresAt) {
 		return false
@@ -435,7 +447,7 @@ func (c *SessionCache) Len() int {
 }
 
 func (c *SessionCache) cleanup() {
-	now := time.Now()
+	now := c.nowTime()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.ensureInitializedLocked()
