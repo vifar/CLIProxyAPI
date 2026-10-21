@@ -317,20 +317,18 @@ func (m *compatCatalogManager) publishLiveModels(ctx context.Context) {
 		return
 	}
 
-	// The merge is only applied while the configuration it was computed against is
-	// still the current one. A reload that committed in the meantime keeps its own
-	// models, and the next refresh reconciles against the new configuration.
-	if !m.service.configSequenceCurrent(sequence) {
+	// The merge is committed only while the configuration it was computed against
+	// is still the current one. The check and the write happen under the same
+	// lock, so a reload that committed in the meantime is never overwritten by a
+	// stale snapshot, and the reload's own models stand.
+	commit := m.service.commitConfigUpdateIfCurrent(merged, sequence)
+	if commit.cfg == nil {
 		return
 	}
 
-	// The service's own configuration update path commits the merged
-	// configuration under the configuration update lock and then applies the
-	// runtime.
-	//
 	// The runtime application re-registers the affected credentials, so the added
 	// models are published to the model registry and become routable.
-	m.service.applyConfigUpdateWithAuthSynthesis(coreauth.WithSkipPersist(ctx), merged, true)
+	m.service.applyConfigRuntime(coreauth.WithSkipPersist(ctx), commit, true)
 }
 
 // compatCatalogModelsEqual reports whether two configured model lists are the same.

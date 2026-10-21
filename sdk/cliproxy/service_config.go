@@ -174,6 +174,41 @@ func (s *Service) configCommitCurrent(commit configCommit) bool {
 	return current
 }
 
+// commitConfigUpdateIfCurrent commits a configuration change only while the
+// configuration sequence it was computed against is still current.
+//
+// The check and the write happen under the same lock, so a configuration
+// committed in between cannot be overwritten by a stale snapshot. It returns an
+// empty commit when the snapshot is superseded.
+func (s *Service) commitConfigUpdateIfCurrent(newCfg *config.Config, expectedSequence uint64) configCommit {
+	if s == nil || newCfg == nil || expectedSequence == 0 {
+		return configCommit{}
+	}
+
+	s.configUpdateMu.Lock()
+	defer s.configUpdateMu.Unlock()
+
+	// The snapshot is stale, so the newer configuration stands.
+	if s.configSequence != expectedSequence {
+		return configCommit{}
+	}
+	if errValidate := newCfg.ValidateCredentialWeights(); errValidate != nil {
+		log.WithError(errValidate).Warn("rejected config update with invalid credential weights")
+		return configCommit{}
+	}
+	if errValidate := newCfg.Models.Validate(); errValidate != nil {
+		log.WithError(errValidate).Warn("rejected invalid model catalog sources")
+		return configCommit{}
+	}
+	s.cfgMu.Lock()
+	s.cfg = newCfg
+	s.cfgMu.Unlock()
+	s.cancelStaleAntigravityProbes("")
+	s.configSequence++
+	registry.UpdateModelCatalogSources(newCfg.Models, newCfg.Home.Enabled)
+	return configCommit{cfg: newCfg, sequence: s.configSequence}
+}
+
 // configSequenceCurrent reports whether the configuration sequence is still the
 // given one.
 //

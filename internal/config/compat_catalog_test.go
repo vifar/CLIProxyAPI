@@ -411,3 +411,21 @@ func TestDiscoveredModelsAreNotWrittenToTheConfiguration(t *testing.T) {
 		t.Fatalf("the discovered marker was written: %s", text)
 	}
 }
+
+func TestMergeCompatCatalogModelsDoesNotCollideWithAnOperatorAlias(t *testing.T) {
+	t.Parallel()
+
+	// The operator publishes "model-b" as the alias of "model-a". A discovered
+	// model called "model-b" must not be added, or requests for the alias would
+	// round-robin between two different upstreams.
+	configured := []OpenAICompatibilityModel{{Name: "model-a", Alias: "model-b"}}
+	live := []CompatCatalogModel{{ID: "model-b"}}
+
+	merged := MergeCompatCatalogModels(configured, live, nil)
+	if len(merged) != 1 {
+		t.Fatalf("merged len = %d, want 1: %+v", len(merged), merged)
+	}
+	if merged[0].Alias != "model-b" || merged[0].Name != "model-a" {
+		t.Fatalf("the operator's row was changed: %+v", merged[0])
+	}
+}
