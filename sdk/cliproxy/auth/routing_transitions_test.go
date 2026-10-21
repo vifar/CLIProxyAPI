@@ -715,10 +715,18 @@ func TestSessionAffinityConcurrentRetriesConsumeTheAttributionOnce(t *testing.T)
 	// The two retries replaced the failed binding: one of them reported the
 	// replacement, and the other reported that it replaced the binding the first
 	// one wrote. Neither reported a creation of the failed binding.
+	//
+	// The events counted are the ones after the failure, so the binding of the
+	// first pick is not counted.
+	// Only the events for this test's model are counted. The recorder is
+	// process-wide, so other tests can record into it.
 	events := recorder.Snapshot().Events
 	replacements := 0
 	creations := 0
 	for _, event := range events {
+		if event.Model != model {
+			continue
+		}
 		switch event.Transition {
 		case RoutingTransitionCredentialReselected, RoutingTransitionProviderFailover:
 			replacements++
@@ -726,11 +734,89 @@ func TestSessionAffinityConcurrentRetriesConsumeTheAttributionOnce(t *testing.T)
 			creations++
 		}
 	}
-	if replacements < 1 {
-		t.Fatalf("replacements = %d, want at least 1: %+v", replacements, events)
-	}
-	// The one creation is the binding of the first pick, before the failure.
+	// The first pick binds the session, which is a creation, and the two
+	// replacements are not. A second creation would mean one of the retries
+	// reported a creation of the failed binding.
 	if creations > 1 {
 		t.Fatalf("creations = %d, want at most 1: %+v", creations, events)
+	}
+	if replacements > 2 {
+		t.Fatalf("replacements = %d, want at most 2: %+v", replacements, events)
+	}
+}
+
+// TestSessionAffinityFailureRecordIsConsumedThroughTheAlias asserts that a
+// failure recorded under the alias is consumed by a retry that carries only the
+// primary identifier.
+//
+// A conversation can be addressed by two prompt cache keys. When one of them
+// fails, the record is published under the alias as well, and a retry that
+// carries the other key must still find it: otherwise the attribution survives
+// and a later replacement is reported against the wrong provider.
+func TestSessionAffinityFailureRecordIsConsumedThroughTheAlias(t *testing.T) {
+	t.Parallel()
+
+	recorder := NewRoutingTransitionRecorder(10)
+	selector, _, providerA, model := routingTransitionTestSelector(t, recorder)
+
+	// The conversation is bound to the first credential, under a prompt cache key
+	// and a conversation identifier.
+	body := func(promptCacheKey string) []byte {
+		return []byte(`{"prompt_cache_key":"` + promptCacheKey + `","conversation":{"id":"rt-conv-alias"},"messages":[{"role":"user","content":"hello"}]}`)
+	}
+	opts := func(promptCacheKey string) cliproxyexecutor.Options {
+		return cliproxyexecutor.Options{
+			Headers:         http.Header{"Content-Type": []string{"application/json"}},
+			OriginalRequest: body(promptCacheKey),
+			Metadata: map[string]any{
+				cliproxyexecutor.SessionAffinityProviderMetadataKey: "mixed",
+				cliproxyexecutor.SessionAffinityModelMetadataKey:    model,
+			},
+		}
+	}
+
+	firstOpts := opts("rt-pck-a")
+	first := []*Auth{{ID: "rt-auth-a", Provider: providerA}}
+	if _, errPick := selector.Pick(context.Background(), "mixed", model, firstOpts, first); errPick != nil {
+		t.Fatalf("first Pick: %v", errPick)
+	}
+
+	// The bound credential fails.
+	selector.OnResult(Result{
+		AuthID:   "rt-auth-a",
+		Provider: "mixed",
+		Model:    model,
+		Success:  false,
+		Error:    &Error{Code: ErrorCodeForceCooldown, Message: "unavailable"},
+		Options:  firstOpts,
+	})
+
+	// The retry carries the other prompt cache key for the same conversation, and
+	// only another provider is eligible. It must find the attribution through the
+	// alias, and it must be reported as a failover from the failed provider.
+	secondOpts := opts("rt-pck-b")
+	second := []*Auth{{ID: "rt-auth-b", Provider: "rt-provider-b"}}
+	if _, errPick := selector.Pick(context.Background(), "mixed", model, secondOpts, second); errPick != nil {
+		t.Fatalf("second Pick: %v", errPick)
+	}
+
+	totals := recorder.Snapshot().Totals
+	if totals[string(RoutingTransitionProviderFailover)] != 1 {
+		t.Fatalf("provider failover = %d, want 1: %+v", totals[string(RoutingTransitionProviderFailover)], totals)
+	}
+
+	// The attribution is gone: it was consumed through the alias.
+	state := selector.affinityState
+	if state == nil {
+		t.Fatal("the affinity state must exist")
+	}
+	state.mu.Lock()
+	for key := range state.failedBindings {
+		t.Logf("surviving record: %q", key)
+	}
+	remaining := len(state.failedBindings)
+	state.mu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("failed binding records = %d, want 0: the attribution is consumed once", remaining)
 	}
 }

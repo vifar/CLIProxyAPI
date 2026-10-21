@@ -1316,22 +1316,30 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	// reported as one replacement and one creation.
 	var cachedAuthID string
 	var cachedFound bool
+	var cachedTransition = RoutingTransitionBindingHit
+	var cachedPreviousProvider string
 	s.withAffinityState(func(state *sessionAffinityState) {
+		// The lookup, the attribution consumption and the binding write are one
+		// step. A lookup outside the transaction let a request read a binding,
+		// pause while another request rebound it, and then restore the stale one
+		// and report a hit.
 		cachedAuthID, cachedFound = s.cache.GetAndRefresh(cacheKey)
+		if !cachedFound {
+			return
+		}
+		// A hit can still be the retry of a failed binding, so the attribution
+		// decides the transition.
+		if failed := s.takeFailedBindingLocked(state, cacheKey); failed != "" {
+			cachedTransition = RoutingTransitionCredentialReselected
+			cachedPreviousProvider = failed
+		}
 	})
 	if cachedFound {
 		for _, auth := range available {
 			if auth.ID == cachedAuthID {
-				// A hit can still be the retry of a failed binding, so the
-				// attribution decides the transition. It is consumed with the
-				// binding written, under one lock.
-				transition := RoutingTransitionBindingHit
-				previousProvider := ""
+				transition := cachedTransition
+				previousProvider := cachedPreviousProvider
 				s.withAffinityState(func(state *sessionAffinityState) {
-					if failed := s.takeFailedBindingLocked(state, cacheKey); failed != "" {
-						transition = RoutingTransitionCredentialReselected
-						previousProvider = failed
-					}
 					bindLocked(state, auth.ID)
 				})
 				entry.Infof("session-affinity: cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
@@ -1461,11 +1469,21 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		// Every identifier's record is consumed together, so a record cannot
 		// survive under one of them and be picked up later by an unrelated
 		// replacement.
-		for _, key := range failedBindingKeys(cacheKey, fallbackKey) {
+		for _, key := range s.failedBindingKeysForBinding(cacheKey, fallbackKey) {
 			if fallbackKey != "" && (isSubagent || isFork) {
 				// A parent's session is not an alias of the child's binding.
 				continue
 			}
+			if failed := s.takeFailedBindingLocked(state, key); failed != "" && failedProvider == "" {
+				failedProvider = failed
+			}
+		}
+		// The records of the identifiers the replaced binding was also known by
+		// are cleared as well. A conversation can be addressed by two prompt
+		// cache keys, and the record published for the one that failed would
+		// otherwise survive and be picked up later by an unrelated replacement,
+		// which would then be reported against the wrong provider.
+		for _, key := range s.cache.AliasGroup(cacheKey) {
 			if failed := s.takeFailedBindingLocked(state, key); failed != "" && failedProvider == "" {
 				failedProvider = failed
 			}
@@ -1708,6 +1726,24 @@ func (s *SessionAffinitySelector) rememberFailedBindingLocked(state *sessionAffi
 		provider: providerKey,
 		at:       time.Now(),
 	}
+}
+
+// failedBindingKeysForBinding returns the keys a failed binding's record is
+// stored under.
+//
+// The record lives under the conversation's stable identifier, so every
+// identifier of the conversation finds it and none of them leaves a stale one
+// behind. A conversation can be addressed by two prompt cache keys, and a record
+// under one of them would survive the failure of the other and be picked up
+// later by an unrelated replacement, which would then be reported against the
+// wrong provider.
+//
+// With no alias the primary identifier is the only name the binding has.
+func (s *SessionAffinitySelector) failedBindingKeysForBinding(cacheKey, fallbackKey string) []string {
+	if fallbackKey != "" && fallbackKey != cacheKey {
+		return []string{fallbackKey}
+	}
+	return []string{cacheKey}
 }
 
 // failedBindingKeys returns the keys a failed binding's record is stored under.
@@ -2475,6 +2511,9 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 	// The attribution is published after the removal, and the removal is
 	// confirmed before it is: a late failure from a credential the session has
 	// already rebound away from must not be recorded as a replacement.
+	// The identifiers that name the binding are read before the removal, because
+	// the removal takes the cache's lock.
+	publicationKeys := s.failedBindingKeysForBinding(cacheKey, fallbackKey)
 	s.withAffinityState(func(state *sessionAffinityState) {
 		publishAttribution := func(removedAuthID string) {
 			if state == nil {
@@ -2496,7 +2535,13 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 			// survive the change and be picked up later by an unrelated
 			// replacement, which would then be reported against the wrong
 			// provider.
-			for _, key := range failedBindingKeys(cacheKey, fallbackKey) {
+			// The record is stored under every identifier that named the binding
+			// that was removed. A conversation can be addressed by two prompt
+			// cache keys, and a record under only one of them would survive the
+			// failure of the other and be picked up later by an unrelated
+			// replacement, which would then be reported against the wrong
+			// provider.
+			for _, key := range publicationKeys {
 				s.rememberFailedBindingLocked(state, key, providerKey)
 			}
 		}

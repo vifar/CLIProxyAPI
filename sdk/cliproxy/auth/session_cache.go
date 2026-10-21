@@ -130,6 +130,57 @@ func (c *SessionCache) GetAndRefresh(sessionID string) (string, bool) {
 	return entry.authID, true
 }
 
+// AliasGroup returns the identifiers that name the same binding as the given
+// one.
+//
+// A conversation can be addressed by more than one identifier. The failure of a
+// binding has to be recorded under all of them, or a retry that carries a
+// different identifier would not find it.
+//
+// The group is collected from the bindings that share the entry's aliases, so
+// two identifiers that were bound to the same credential are in one group even
+// when they are separate entries.
+func (c *SessionCache) AliasGroup(sessionID string) []string {
+	if c == nil || sessionID == "" {
+		return nil
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	c.ensureInitializedLocked()
+	entry, ok := c.entries[sessionID]
+	if !ok {
+		return nil
+	}
+	group := make([]string, 0, len(entry.aliases)+1)
+	group = append(group, sessionID)
+	for _, alias := range entry.aliases {
+		if alias == sessionID {
+			continue
+		}
+		group = append(group, alias)
+		// An identifier that was bound to the same credential names the same
+		// binding, even when it is a separate entry.
+		if other, okOther := c.entries[alias]; okOther && other.authID == entry.authID {
+			for _, nested := range other.aliases {
+				if nested != alias && !containsSessionAlias(group, nested) {
+					group = append(group, nested)
+				}
+			}
+		}
+	}
+	return group
+}
+
+// containsSessionAlias reports whether the list already holds the identifier.
+func containsSessionAlias(list []string, value string) bool {
+	for _, item := range list {
+		if item == value {
+			return true
+		}
+	}
+	return false
+}
+
 // Set binds a session to an auth ID with TTL refresh. Existing aliases for the
 // same logical session remain attached when the binding is refreshed or moved.
 func (c *SessionCache) Set(sessionID, authID string) {
