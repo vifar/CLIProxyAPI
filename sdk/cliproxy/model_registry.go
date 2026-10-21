@@ -174,6 +174,12 @@ func resolveCompatConfigEntry(cfg *config.Config, a *coreauth.Auth) *config.Open
 	if cfg == nil || a == nil || len(cfg.OpenAICompatibility) == 0 {
 		return nil
 	}
+	// Only a compatible credential names a compatible provider entry. A native
+	// credential can carry a configuration index too, and resolving it against
+	// the compatible entries would apply one provider's exclusions to it.
+	if _, _, ok := openAICompatInfoFromAuth(a); !ok {
+		return nil
+	}
 	if a.AuthSourceKind() == coreauth.AuthSourceConfig && a.Attributes != nil {
 		index, errIndex := strconv.Atoi(strings.TrimSpace(a.Attributes[coreauth.AttributeConfigIndex]))
 		if errIndex == nil && index >= 0 && index < len(cfg.OpenAICompatibility) {

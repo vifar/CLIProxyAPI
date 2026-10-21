@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
 )
 
@@ -223,8 +224,16 @@ func MergeCompatCatalogModels(configured []OpenAICompatibilityModel, live []Comp
 	for _, model := range configured {
 		merged = append(merged, model)
 		key := compatCatalogModelKey(model)
+		// The alias and its base name are both reserved. The routing lookup
+		// tries the base name when the requested model carries a suffix, so an
+		// alias of "model-b(high)" also answers a request for "model-b". A
+		// discovered model that took that name would make the request round
+		// robin between two different upstreams.
 		if alias := strings.TrimSpace(model.Alias); alias != "" {
 			aliases[strings.ToLower(alias)] = struct{}{}
+			if base := compatCatalogStripThinkingSuffix(alias); base != alias {
+				aliases[strings.ToLower(base)] = struct{}{}
+			}
 		}
 		if key == "" {
 			continue
@@ -299,32 +308,27 @@ func CompatCatalogModelExcluded(modelID string, excluded []string) bool {
 // compatCatalogStripThinkingSuffix removes a trailing thinking suffix from a
 // model name.
 //
-// A model name may carry a suffix in parentheses, such as "(high)", which
-// selects a reasoning effort rather than a different model. The suffix is
-// stripped before the request reaches the provider.
+// A model name may carry a suffix in parentheses, such as "(high)" or a numeric
+// budget, which selects a reasoning effort rather than a different model. The
+// suffix is stripped before the request reaches the provider, so the identity
+// that reaches the provider is the name without it.
+//
+// The parsing is the executor's own, so the two cannot disagree about which
+// names carry a suffix.
 func compatCatalogStripThinkingSuffix(model string) string {
 	trimmed := strings.TrimSpace(model)
 	if trimmed == "" {
 		return ""
 	}
-	open := strings.LastIndex(trimmed, "(")
-	if open <= 0 {
+	parsed := thinking.ParseSuffix(trimmed)
+	if !parsed.HasSuffix {
 		return trimmed
 	}
-	if !strings.HasSuffix(trimmed, ")") {
+	base := strings.TrimSpace(parsed.ModelName)
+	if base == "" {
 		return trimmed
 	}
-	inner := strings.TrimSpace(trimmed[open+1 : len(trimmed)-1])
-	if inner == "" {
-		return trimmed
-	}
-	// Only a known reasoning effort is a suffix. Anything else is part of the
-	// model's name.
-	switch strings.ToLower(inner) {
-	case "minimal", "low", "medium", "high", "xhigh", "max", "none":
-		return strings.TrimSpace(trimmed[:open])
-	}
-	return trimmed
+	return base
 }
 
 // compatCatalogMatchWildcard matches a value against a wildcard pattern.

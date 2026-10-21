@@ -414,13 +414,36 @@ func TestCompatCatalogModelExcludedMatchesTheUpstreamIdentity(t *testing.T) {
 	if CompatCatalogModelExcluded("openai/gpt-4o", excluded) {
 		t.Fatal("a different model must not be excluded")
 	}
-	// A suffix that is not a reasoning effort is part of the name.
-	if CompatCatalogModelExcluded("openai/gpt-4.1(turbo)", excluded) {
-		t.Fatal("a name that is not a reasoning suffix must not be stripped")
+	// The executor strips any parenthesized suffix before sending the request
+	// upstream, so the exclusion has to match that identity too.
+	if !CompatCatalogModelExcluded("openai/gpt-4.1(8192)", excluded) {
+		t.Fatal("a model with a numeric suffix must be excluded by its upstream name")
+	}
+	if !CompatCatalogModelExcluded("openai/gpt-4.1(auto)", excluded) {
+		t.Fatal("a model with an automatic suffix must be excluded by its upstream name")
 	}
 	// The alias is not the upstream identity, so an exclusion for the upstream
 	// name does not match an unrelated model.
 	if CompatCatalogModelExcluded("some-other-model", excluded) {
 		t.Fatal("an unrelated model must not be excluded")
+	}
+}
+
+func TestMergeCompatCatalogModelsReservesTheAliasBaseName(t *testing.T) {
+	t.Parallel()
+
+	// The routing lookup tries the base name when the requested model carries a
+	// suffix, so an alias of "model-b(high)" also answers a request for
+	// "model-b". A discovered model that took that name would make the request
+	// round robin between two different upstreams.
+	configured := []OpenAICompatibilityModel{{Name: "model-a", Alias: "model-b(high)"}}
+	live := []CompatCatalogModel{{ID: "model-b"}}
+
+	merged := MergeCompatCatalogModels(configured, live, nil)
+	if len(merged) != 1 {
+		t.Fatalf("merged len = %d, want 1: %+v", len(merged), merged)
+	}
+	if merged[0].Alias != "model-b(high)" {
+		t.Fatalf("merged = %+v, want the operator's row", merged[0])
 	}
 }

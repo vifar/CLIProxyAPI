@@ -267,11 +267,15 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 				if providerKey == "" {
 					providerKey = "openai-compatibility"
 				}
+				// The provider's own exclusions apply to the models a plugin
+				// publishes for it as well. Without them an excluded model
+				// would still be published, and a request could route to it.
+				compatExcluded := compat.ExcludedModels
 				if len(ms) > 0 {
-					ms = s.appendPluginModels(providerKey, ms, nil)
+					ms = s.appendPluginModels(providerKey, ms, compatExcluded)
 					published = s.registerResolvedModelsForAuthFenced(a, fence, providerKey, applyModelPrefixes(ms, a.Prefix, cfg.ForceModelPrefix))
 				} else {
-					ms = s.appendPluginModels(providerKey, nil, nil)
+					ms = s.appendPluginModels(providerKey, nil, compatExcluded)
 					if len(ms) > 0 {
 						published = s.registerResolvedModelsForAuthFenced(a, fence, providerKey, applyModelPrefixes(ms, a.Prefix, cfg.ForceModelPrefix))
 					} else {
@@ -290,11 +294,17 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 						providerKey = "openai-compatibility"
 					}
 					ms := cached.models
+					// The provider's own exclusions apply to the models a plugin
+					// publishes for it as well.
+					var compatExcluded []string
+					if entry := resolveCompatConfigEntry(cfg, a); entry != nil {
+						compatExcluded = entry.ExcludedModels
+					}
 					if len(ms) > 0 {
-						ms = s.appendPluginModels(providerKey, ms, nil)
+						ms = s.appendPluginModels(providerKey, ms, compatExcluded)
 						published = s.registerResolvedModelsForAuthFenced(a, fence, providerKey, applyModelPrefixes(ms, a.Prefix, cfg.ForceModelPrefix))
 					} else {
-						ms = s.appendPluginModels(providerKey, nil, nil)
+						ms = s.appendPluginModels(providerKey, nil, compatExcluded)
 						if len(ms) > 0 {
 							published = s.registerResolvedModelsForAuthFenced(a, fence, providerKey, applyModelPrefixes(ms, a.Prefix, cfg.ForceModelPrefix))
 						} else {
