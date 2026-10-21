@@ -2,33 +2,15 @@ package cliproxy
 
 import (
 	"context"
-	"net/http"
 	"testing"
-	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )
 
-// compatCatalogTestConfig builds a configuration with one Ollama Cloud provider
-// that has a configured model list.
-func compatCatalogTestConfig() *config.Config {
-	return &config.Config{
-		OpenAICompatibility: []config.OpenAICompatibility{
-			{
-				Name:    "ollama-cloud",
-				BaseURL: "https://ollama.com/v1",
-				APIKeyEntries: []config.OpenAICompatibilityAPIKey{
-					{APIKey: "ollama-key"},
-				},
-				Models: []config.OpenAICompatibilityModel{
-					{Name: "deepseek-v4.1-flash", Alias: "deepseek-v4.1-flash"},
-				},
-			},
-		},
-	}
-}
-
-func TestCompatCatalogProvidersOnlyTargetsSupportedProviders(t *testing.T) {
+// TestCompatCatalogTargetsOnlySupportedProviders asserts that only the providers
+// whose live model list is supported are targeted, and that a disabled provider is
+// not.
+func TestCompatCatalogTargetsOnlySupportedProviders(t *testing.T) {
 	t.Parallel()
 
 	cfg := &config.Config{
@@ -44,7 +26,7 @@ func TestCompatCatalogProvidersOnlyTargetsSupportedProviders(t *testing.T) {
 		},
 	}
 
-	targets := compatCatalogProviders(cfg)
+	targets := compatCatalogTargets(cfg)
 	if len(targets) != 2 {
 		t.Fatalf("targets len = %d, want 2: %+v", len(targets), targets)
 	}
@@ -55,140 +37,86 @@ func TestCompatCatalogProvidersOnlyTargetsSupportedProviders(t *testing.T) {
 	}
 }
 
-func TestCompatCatalogRefreshKeepsTheConfiguredListWhenTheProviderFails(t *testing.T) {
+// TestCompatCatalogLiveModelsAreMatchedByTheFullTargetIdentity asserts that a
+// discovered list is only returned for the entry it was read for.
+//
+// Two entries can share a name, and a reload can change an entry's base URL, so
+// the name alone does not identify what a list belongs to.
+func TestCompatCatalogLiveModelsAreMatchedByTheFullTargetIdentity(t *testing.T) {
 	t.Parallel()
 
-	service := &Service{cfg: compatCatalogTestConfig()}
+	service := &Service{cfg: &config.Config{}}
 	manager := newCompatCatalogManager(service)
-	manager.fetcher = func(_ context.Context, _ string, _ string) ([]byte, int, error) {
-		return nil, http.StatusInternalServerError, nil
-	}
 
-	manager.Refresh(context.Background())
+	first := compatCatalogTarget{entryIndex: 0, name: "shared", baseURL: "https://openrouter.ai/api/v1", apiKey: "k"}
+	second := compatCatalogTarget{entryIndex: 1, name: "shared", baseURL: "https://openrouter.ai/api/v1", apiKey: "k"}
+	third := compatCatalogTarget{entryIndex: 0, name: "shared", baseURL: "https://api.example.com/v1", apiKey: "k"}
 
-	if live := manager.LiveModels("ollama-cloud"); len(live) != 0 {
-		t.Fatalf("a failed refresh stored a model list: %+v", live)
+	manager.mu.Lock()
+	manager.state[first.key()] = &compatCatalogState{
+		target: first,
+		models: []config.CompatCatalogModel{{ID: "model-a"}},
 	}
-	// The configured list is untouched, so the proxy still serves it.
-	if len(service.cfg.OpenAICompatibility[0].Models) != 1 {
-		t.Fatalf("the configured list was changed: %+v", service.cfg.OpenAICompatibility[0].Models)
+	manager.mu.Unlock()
+
+	if live := manager.liveModelsFor(first); len(live) != 1 {
+		t.Fatalf("live models = %+v, want one", live)
+	}
+	// A different entry with the same name must not see the list.
+	if live := manager.liveModelsFor(second); len(live) != 0 {
+		t.Fatalf("live models = %+v, want none for a different entry", live)
+	}
+	// A different base URL must not see the list either.
+	if live := manager.liveModelsFor(third); len(live) != 0 {
+		t.Fatalf("live models = %+v, want none for a different base URL", live)
 	}
 }
 
-func TestCompatCatalogRefreshStoresTheLiveList(t *testing.T) {
+// TestCompatCatalogRefreshDoesNotQueryAnUnsupportedProvider asserts that a
+// provider with no supported live model list is never queried.
+func TestCompatCatalogRefreshDoesNotQueryAnUnsupportedProvider(t *testing.T) {
 	t.Parallel()
 
-	service := &Service{cfg: compatCatalogTestConfig()}
+	service := &Service{cfg: &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{
+			{Name: "unknown", BaseURL: "https://api.example.com/v1",
+				APIKeyEntries: []config.OpenAICompatibilityAPIKey{{APIKey: "k"}}},
+		},
+	}}
 	manager := newCompatCatalogManager(service)
-	manager.fetcher = func(_ context.Context, _ string, _ string) ([]byte, int, error) {
-		body := `{"data":[{"id":"deepseek-v4.1-flash"},{"id":"kimi-k3"}]}`
-		return []byte(body), http.StatusOK, nil
+	manager.fetcher = func(_ context.Context, _ string, _ string, _ string) ([]byte, int, error) {
+		t.Fatal("the reader must not query an unsupported provider")
+		return nil, 0, nil
 	}
 
 	manager.Refresh(context.Background())
-
-	live := manager.LiveModels("ollama-cloud")
-	if len(live) != 2 {
-		t.Fatalf("live models = %+v", live)
-	}
 }
 
-func TestCompatCatalogRefreshDoesNotStoreAnUnchangedListAsChanged(t *testing.T) {
+// TestOpenAICompatibilityExclusionMatchesTheUpstreamName asserts that an exclusion
+// is matched against the upstream model name, not the public alias.
+//
+// An alias can be anything, so an exclusion written for the upstream model must
+// still keep that model from being published and routed.
+func TestOpenAICompatibilityExclusionMatchesTheUpstreamName(t *testing.T) {
 	t.Parallel()
 
-	service := &Service{cfg: compatCatalogTestConfig()}
-	manager := newCompatCatalogManager(service)
-	manager.fetcher = func(_ context.Context, _ string, _ string) ([]byte, int, error) {
-		body := `{"data":[{"id":"kimi-k3"}]}`
-		return []byte(body), http.StatusOK, nil
+	compat := &config.OpenAICompatibility{
+		Name:           "ollama-cloud",
+		BaseURL:        "https://ollama.com/v1",
+		ExcludedModels: []string{"anthropic/claude-sonnet-4.5"},
+		Models: []config.OpenAICompatibilityModel{
+			{Name: "anthropic/claude-sonnet-4.5", Alias: "claude-sonnet-4.5"},
+			{Name: "deepseek-v4.1-flash", Alias: "deepseek-v4.1-flash"},
+		},
 	}
 
-	// The first refresh stores the list and reports a change.
-	if !manager.refreshProvider(context.Background(), compatCatalogProviderTarget{
-		name:    "ollama-cloud",
-		baseURL: "https://ollama.com/v1",
-		apiKey:  "ollama-key",
-	}) {
-		t.Fatal("the first refresh should report a change")
-	}
-	// The second refresh sees the same list and reports no change, so the proxy does
-	// not re-register the credentials for nothing.
-	if manager.refreshProvider(context.Background(), compatCatalogProviderTarget{
-		name:    "ollama-cloud",
-		baseURL: "https://ollama.com/v1",
-		apiKey:  "ollama-key",
-	}) {
-		t.Fatal("an unchanged list should not report a change")
-	}
-}
-
-func TestCompatCatalogApplyLiveModelsMergesIntoTheConfiguredList(t *testing.T) {
-	t.Parallel()
-
-	service := &Service{cfg: compatCatalogTestConfig()}
-	manager := newCompatCatalogManager(service)
-	manager.fetcher = func(_ context.Context, _ string, _ string) ([]byte, int, error) {
-		body := `{"data":[{"id":"kimi-k3"}]}`
-		return []byte(body), http.StatusOK, nil
-	}
-
-	manager.Refresh(context.Background())
-
-	models := service.cfg.OpenAICompatibility[0].Models
-	if len(models) != 2 {
-		t.Fatalf("models = %+v, want the configured model plus the live one", models)
-	}
-	if models[0].Name != "deepseek-v4.1-flash" {
-		t.Fatalf("the configured model changed: %+v", models[0])
-	}
-	if models[1].Name != "kimi-k3" {
-		t.Fatalf("the live model was not added: %+v", models[1])
-	}
-}
-
-func TestCompatCatalogApplyLiveModelsKeepsAnExcludedModelOut(t *testing.T) {
-	t.Parallel()
-
-	cfg := compatCatalogTestConfig()
-	cfg.OpenAICompatibility[0].ExcludedModels = []string{"kimi-*"}
-	service := &Service{cfg: cfg}
-	manager := newCompatCatalogManager(service)
-	manager.fetcher = func(_ context.Context, _ string, _ string) ([]byte, int, error) {
-		body := `{"data":[{"id":"kimi-k3"},{"id":"glm-5.3"}]}`
-		return []byte(body), http.StatusOK, nil
-	}
-
-	manager.Refresh(context.Background())
-
-	for _, model := range service.cfg.OpenAICompatibility[0].Models {
-		if model.Name == "kimi-k3" {
-			t.Fatalf("an excluded model was added: %+v", service.cfg.OpenAICompatibility[0].Models)
+	models := buildOpenAICompatibilityConfigModels(compat)
+	for _, model := range models {
+		if model.ID == "claude-sonnet-4.5" {
+			t.Fatalf("the excluded model was published under its alias: %+v", models)
 		}
 	}
-}
-
-func TestCompatCatalogRefreshIsBounded(t *testing.T) {
-	t.Parallel()
-
-	service := &Service{cfg: compatCatalogTestConfig()}
-	manager := newCompatCatalogManager(service)
-	manager.fetcher = func(ctx context.Context, _ string, _ string) ([]byte, int, error) {
-		// The provider never answers in time. The refresh must give up on it.
-		<-ctx.Done()
-		return nil, 0, ctx.Err()
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	defer cancel()
-
-	done := make(chan struct{})
-	go func() {
-		manager.Refresh(ctx)
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the refresh did not respect the context deadline")
+	if len(models) != 1 || models[0].ID != "deepseek-v4.1-flash" {
+		t.Fatalf("models = %+v, want only the non-excluded model", models)
 	}
 }

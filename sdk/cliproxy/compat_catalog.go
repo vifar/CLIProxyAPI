@@ -17,24 +17,78 @@ import (
 const CompatCatalogRefreshInterval = 3 * time.Hour
 
 // compatCatalogRefreshTimeout bounds one refresh pass, so a slow provider cannot
-// hold the refresh loop.
+// hold the refresh loop. It is a budget for the whole pass, not a deadline
+// imposed on the upstream request.
 const compatCatalogRefreshTimeout = 60 * time.Second
 
 // compatCatalogFetcher is the live model list reader. It is replaceable in tests.
 type compatCatalogFetcher = config.CompatCatalogFetcher
 
-// compatCatalogState tracks the live model list of one provider.
+// compatCatalogState tracks the live model list of one configured provider entry.
+//
+// The entry is identified by its full target identity, not by its name: two
+// entries can share a name, and a reload can change an entry's base URL, so the
+// name alone does not identify what a discovered list belongs to.
 type compatCatalogState struct {
-	// providerName is the configured provider name.
-	providerName string
-	// baseURL is the configured provider base URL.
-	baseURL string
-	// apiKey is the provider key used for the live read.
-	apiKey string
+	// target is the configured entry this list belongs to.
+	target compatCatalogTarget
 	// models is the last known good live model list.
 	models []config.CompatCatalogModel
 	// fetchedAt is when the list was last read.
 	fetchedAt time.Time
+}
+
+// compatCatalogTarget identifies one configured provider entry.
+//
+// The identity covers the entry's position, its name, its base URL and its key, so
+// a list is only ever applied to the entry it was read for.
+type compatCatalogTarget struct {
+	// entryIndex is the entry's position in the configuration.
+	entryIndex int
+	// name is the configured provider name.
+	name string
+	// baseURL is the configured provider base URL.
+	baseURL string
+	// apiKey is the provider key used for the live read.
+	apiKey string
+	// proxyURL is the proxy the credential's own requests use, if any. The live
+	// read uses it too, so a provider reachable only through its configured proxy
+	// can be discovered.
+	proxyURL string
+}
+
+// key returns the identity of the target.
+func (t compatCatalogTarget) key() string {
+	return strings.Join([]string{
+		itoa(t.entryIndex),
+		t.name,
+		t.baseURL,
+		t.apiKey,
+		t.proxyURL,
+	}, "\x00")
+}
+
+// itoa renders an int without pulling in strconv for one call.
+func itoa(value int) string {
+	if value == 0 {
+		return "0"
+	}
+	negative := value < 0
+	if negative {
+		value = -value
+	}
+	var digits [20]byte
+	index := len(digits)
+	for value > 0 {
+		index--
+		digits[index] = byte('0' + value%10)
+		value /= 10
+	}
+	if negative {
+		index--
+		digits[index] = '-'
+	}
+	return string(digits[index:])
 }
 
 // compatCatalogManager keeps the live model lists of the configured
@@ -45,7 +99,8 @@ type compatCatalogManager struct {
 	// fetcher reads a provider's live model list.
 	fetcher compatCatalogFetcher
 
-	mu    sync.Mutex
+	mu sync.Mutex
+	// state holds the last known good list per configured entry.
 	state map[string]*compatCatalogState
 }
 
@@ -60,7 +115,7 @@ func newCompatCatalogManager(service *Service) *compatCatalogManager {
 
 // Start begins the background refresh loop. The loop is bounded: a provider that
 // cannot be read keeps its last known good list, and the configured list is always
-// used as the floor.
+// the floor.
 func (m *compatCatalogManager) Start(ctx context.Context) {
 	if m == nil || m.service == nil {
 		return
@@ -79,9 +134,11 @@ func (m *compatCatalogManager) Start(ctx context.Context) {
 	}()
 }
 
-// Refresh reads the live model list of every supported provider and applies the
-// merged list. It never blocks the caller for longer than one provider's timeout
-// per provider, and a failure leaves the previous list in place.
+// Refresh reads the live model list of every supported provider and publishes the
+// merged list.
+//
+// The publication goes through the service's own configuration commit boundary, so
+// a file reload that commits meanwhile is never overwritten by a stale snapshot.
 func (m *compatCatalogManager) Refresh(ctx context.Context) {
 	if m == nil || m.service == nil {
 		return
@@ -93,86 +150,28 @@ func (m *compatCatalogManager) Refresh(ctx context.Context) {
 		return
 	}
 	changed := false
-	for _, provider := range compatCatalogProviders(cfg) {
+	for _, target := range compatCatalogTargets(cfg) {
 		if ctx.Err() != nil {
 			return
 		}
 		refreshCtx, cancel := context.WithTimeout(ctx, compatCatalogRefreshTimeout)
-		if m.refreshProvider(refreshCtx, provider) {
+		if m.refreshProvider(refreshCtx, target) {
 			changed = true
 		}
 		cancel()
 	}
 	if changed {
-		m.applyLiveModels(ctx)
+		m.publishLiveModels(ctx)
 	}
 }
 
-// applyLiveModels merges the live model lists into the running configuration and
-// re-registers the affected credentials, so the new models become routable without
-// a restart.
-//
-// The configured list is always the floor: a live list only adds models the
-// configuration does not mention, and it never removes a configured model.
-func (m *compatCatalogManager) applyLiveModels(ctx context.Context) {
-	if m == nil || m.service == nil {
-		return
-	}
-	m.service.cfgMu.RLock()
-	current := m.service.cfg
-	m.service.cfgMu.RUnlock()
-	if current == nil {
-		return
-	}
-
-	merged := current.CloneForRuntime()
-	if merged == nil {
-		return
-	}
-	changed := false
-	for index := range merged.OpenAICompatibility {
-		provider := &merged.OpenAICompatibility[index]
-		live := m.LiveModels(strings.TrimSpace(provider.Name))
-		if len(live) == 0 {
-			continue
-		}
-		updated := config.MergeCompatCatalogModels(provider.Models, live, provider.ExcludedModels)
-		if len(updated) == len(provider.Models) {
-			continue
-		}
-		provider.Models = updated
-		changed = true
-	}
-	if !changed {
-		return
-	}
-
-	m.service.cfgMu.Lock()
-	m.service.cfg = merged
-	m.service.cfgMu.Unlock()
-
-	// Re-register the credentials so the added models are published to the model
-	// registry and become routable.
-	registrationCtx := coreauth.WithSkipPersist(ctx)
-	m.service.registerConfigAPIKeyAuths(registrationCtx, merged)
-}
-
-// compatCatalogProviderTarget is one provider the refresh reads.
-type compatCatalogProviderTarget struct {
-	// name is the configured provider name.
-	name string
-	// baseURL is the configured provider base URL.
-	baseURL string
-	// apiKey is the provider key used for the live read.
-	apiKey string
-}
-
-// compatCatalogProviders returns the providers whose live model list is supported.
-func compatCatalogProviders(cfg *config.Config) []compatCatalogProviderTarget {
+// compatCatalogTargets returns the configured entries whose live model list is
+// supported.
+func compatCatalogTargets(cfg *config.Config) []compatCatalogTarget {
 	if cfg == nil {
 		return nil
 	}
-	targets := make([]compatCatalogProviderTarget, 0, len(cfg.OpenAICompatibility))
+	targets := make([]compatCatalogTarget, 0, len(cfg.OpenAICompatibility))
 	for index := range cfg.OpenAICompatibility {
 		provider := &cfg.OpenAICompatibility[index]
 		if provider.Disabled {
@@ -183,16 +182,22 @@ func compatCatalogProviders(cfg *config.Config) []compatCatalogProviderTarget {
 			continue
 		}
 		apiKey := ""
+		proxyURL := strings.TrimSpace(cfg.ProxyURL)
 		for _, entry := range provider.APIKeyEntries {
 			if key := strings.TrimSpace(entry.APIKey); key != "" {
 				apiKey = key
+				if keyProxy := strings.TrimSpace(entry.ProxyURL); keyProxy != "" {
+					proxyURL = keyProxy
+				}
 				break
 			}
 		}
-		targets = append(targets, compatCatalogProviderTarget{
-			name:    strings.TrimSpace(provider.Name),
-			baseURL: baseURL,
-			apiKey:  apiKey,
+		targets = append(targets, compatCatalogTarget{
+			entryIndex: index,
+			name:       strings.TrimSpace(provider.Name),
+			baseURL:    baseURL,
+			apiKey:     apiKey,
+			proxyURL:   proxyURL,
 		})
 	}
 	return targets
@@ -200,11 +205,11 @@ func compatCatalogProviders(cfg *config.Config) []compatCatalogProviderTarget {
 
 // refreshProvider reads one provider's live model list and stores it. It reports
 // whether the list changed.
-func (m *compatCatalogManager) refreshProvider(ctx context.Context, target compatCatalogProviderTarget) bool {
+func (m *compatCatalogManager) refreshProvider(ctx context.Context, target compatCatalogTarget) bool {
 	if target.name == "" {
 		return false
 	}
-	models, errList := config.CompatCatalogModelList(ctx, target.baseURL, target.apiKey, m.fetcher)
+	models, errList := config.CompatCatalogModelList(ctx, target.baseURL, target.apiKey, target.proxyURL, m.fetcher)
 	if errList != nil {
 		// A failed refresh keeps the last known good list.
 		log.WithError(errList).Warnf("compat catalog: live model list unavailable for provider %s", target.name)
@@ -212,14 +217,12 @@ func (m *compatCatalogManager) refreshProvider(ctx context.Context, target compa
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	previous, existed := m.state[target.name]
+	previous, existed := m.state[target.key()]
 	changed := !existed || !compatCatalogModelIDsEqual(previous.models, models)
-	m.state[target.name] = &compatCatalogState{
-		providerName: target.name,
-		baseURL:      target.baseURL,
-		apiKey:       target.apiKey,
-		models:       models,
-		fetchedAt:    time.Now(),
+	m.state[target.key()] = &compatCatalogState{
+		target:    target,
+		models:    models,
+		fetchedAt: time.Now(),
 	}
 	return changed
 }
@@ -238,16 +241,94 @@ func compatCatalogModelIDsEqual(left, right []config.CompatCatalogModel) bool {
 	return true
 }
 
-// LiveModels returns the last known good live model list of one provider.
-func (m *compatCatalogManager) LiveModels(providerName string) []config.CompatCatalogModel {
-	if m == nil {
-		return nil
-	}
+// liveModelsFor returns the last known good live model list of one configured
+// entry.
+//
+// The entry's full identity is matched, so a list discovered for one entry is
+// never applied to another entry that happens to share its name.
+func (m *compatCatalogManager) liveModelsFor(target compatCatalogTarget) []config.CompatCatalogModel {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	state, ok := m.state[providerName]
+	state, ok := m.state[target.key()]
 	if !ok || state == nil {
 		return nil
 	}
 	return state.models
+}
+
+// publishLiveModels applies the live model lists to the running configuration and
+// re-registers the affected credentials, so the added models are published to the
+// model registry and become routable.
+//
+// The configured list is always the floor: a live list only adds models the
+// configuration does not mention, and it never removes a configured model.
+//
+// The publication goes through the service's configuration commit boundary, so a
+// file reload that commits meanwhile is not overwritten by a stale snapshot.
+func (m *compatCatalogManager) publishLiveModels(ctx context.Context) {
+	if m == nil || m.service == nil {
+		return
+	}
+	m.service.cfgMu.RLock()
+	current := m.service.cfg
+	m.service.cfgMu.RUnlock()
+	if current == nil {
+		return
+	}
+
+	targets := compatCatalogTargets(current)
+	merged := current.CloneForRuntime()
+	if merged == nil {
+		return
+	}
+	changed := false
+	for index := range merged.OpenAICompatibility {
+		provider := &merged.OpenAICompatibility[index]
+		target := compatCatalogTarget{
+			entryIndex: index,
+			name:       strings.TrimSpace(provider.Name),
+			baseURL:    strings.TrimSpace(provider.BaseURL),
+		}
+		for _, candidate := range targets {
+			if candidate.entryIndex == index {
+				target = candidate
+				break
+			}
+		}
+		live := m.liveModelsFor(target)
+		if len(live) == 0 {
+			continue
+		}
+		updated := config.MergeCompatCatalogModels(provider.Models, live, provider.ExcludedModels)
+		if compatCatalogModelsEqual(provider.Models, updated) {
+			continue
+		}
+		provider.Models = updated
+		changed = true
+	}
+	if !changed {
+		return
+	}
+
+	// The service's own configuration update path commits the merged
+	// configuration under the configuration update lock and then applies the
+	// runtime, so a file reload that committed while the merge was computed is
+	// never overwritten by a stale snapshot.
+	//
+	// The runtime application re-registers the affected credentials, so the added
+	// models are published to the model registry and become routable.
+	m.service.applyConfigUpdateWithAuthSynthesis(coreauth.WithSkipPersist(ctx), merged, true)
+}
+
+// compatCatalogModelsEqual reports whether two configured model lists are the same.
+func compatCatalogModelsEqual(left, right []config.OpenAICompatibilityModel) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index].Name != right[index].Name || left[index].Alias != right[index].Alias {
+			return false
+		}
+	}
+	return true
 }
