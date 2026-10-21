@@ -343,3 +343,35 @@ func TestSessionAffinityScopedLookupMatchesEveryCandidateSuffix(t *testing.T) {
 		t.Fatal("another namespace's binding was found")
 	}
 }
+
+// TestSessionAffinityScopedLookupDoesNotMatchAnotherSession asserts that a
+// session identifier containing the key separator cannot make one session's binding
+// match another session's lookup.
+//
+// The lookup matches the session and the model as a suffix, so a session identifier
+// that embeds the separator would otherwise let one session's key answer another
+// session's lookup.
+func TestSessionAffinityScopedLookupDoesNotMatchAnotherSession(t *testing.T) {
+	t.Parallel()
+
+	cache := NewSessionCache(time.Hour)
+	defer cache.Stop()
+
+	// The bound session's identifier embeds the separator.
+	cache.Set("mixed[a,b]::header:x]::header:s1::model", "auth-1")
+
+	found := cache.GetByScopeSuffixes("mixed", []string{"::header:s1::model"})
+	if len(found) != 0 {
+		t.Fatalf("found = %v, want no match: the head is not a namespace", found)
+	}
+
+	// The plain binding still matches.
+	cache.Set("mixed[a,b]::header:s1::model", "auth-2")
+	found = cache.GetByScopeSuffixes("mixed", []string{"::header:s1::model"})
+	if len(found) != 1 {
+		t.Fatalf("found = %v, want the plain binding", found)
+	}
+	if _, ok := found["auth-2"]; !ok {
+		t.Fatalf("found = %v, want auth-2", found)
+	}
+}

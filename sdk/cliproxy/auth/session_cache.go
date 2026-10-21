@@ -176,13 +176,19 @@ func (c *SessionCache) GetByScopeSuffixes(namespace string, suffixes []string) m
 				continue
 			}
 			head := strings.TrimSuffix(key, suffix)
-			// The head is the namespace plus its scope: "mixed" or "mixed[a,b]".
-			if head != namespace && !strings.HasPrefix(head, namespace+"[") {
-				continue
-			}
+			// The head must be exactly the namespace, or the namespace followed by a
+			// closed scope. A longer head is not a namespace: a session identifier
+			// that contains the separator would otherwise make one session's key
+			// match another session's lookup.
 			if head != namespace {
-				// The scope must be closed, so "mixed[a,b" is not a scoped namespace.
+				if !strings.HasPrefix(head, namespace+"[") {
+					continue
+				}
 				if !strings.HasSuffix(head, "]") {
+					continue
+				}
+				// Nothing may follow the closed scope.
+				if scope := strings.TrimSuffix(strings.TrimPrefix(head, namespace+"["), "]"); strings.ContainsAny(scope, "[]") {
 					continue
 				}
 			}
