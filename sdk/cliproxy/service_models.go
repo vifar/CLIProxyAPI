@@ -79,6 +79,15 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 			excluded = strings.Split(val, ",")
 		}
 	}
+	// The compatible provider's own exclusions apply to the models a plugin
+	// publishes for it. The plugin path returns before the configured rows are
+	// filtered, so without this an excluded model would still be published and a
+	// request could route to it.
+	if compatDetected {
+		if entry := resolveCompatConfigEntry(cfg, a); entry != nil && len(entry.ExcludedModels) > 0 {
+			excluded = append(append([]string(nil), excluded...), entry.ExcludedModels...)
+		}
+	}
 	if handled, published := s.tryRegisterPluginModelsForAuthWithConfigFenced(ctx, cfg, a, fence, provider, authKind, excluded); handled {
 		return published
 	}
