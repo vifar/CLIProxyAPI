@@ -133,11 +133,20 @@ func TestServiceConcurrentReplacementWaitsForInFlightDrain(t *testing.T) {
 		service.startHomeSubscriber(ctx)
 		close(firstReturned)
 	}()
+	// The loop waits for the registry to refuse a further dispatch, which only
+	// happens once the first replacement is draining.
+	//
+	// Every reservation it takes is released. A reservation that is left open
+	// keeps the drain from finishing, and the drain's bound would then expire
+	// instead: the waits below would accept that as the second replacement
+	// having waited, and the test would pass without checking anything.
 	deadline := time.Now().Add(time.Second)
 	for {
-		if _, errLate := registry.BeginDispatch(); errLate != nil {
+		late, errLate := registry.BeginDispatch()
+		if errLate != nil {
 			break
 		}
+		late.End()
 		if time.Now().After(deadline) {
 			t.Fatal("first replacement did not begin draining")
 		}
@@ -167,6 +176,9 @@ func TestServiceConcurrentReplacementWaitsForInFlightDrain(t *testing.T) {
 	case <-time.After(time.Second):
 		// The second replacement is still waiting for the first drain, which is
 		// what the test is about. It returns once the drain is released below.
+		//
+		// The wait is a window, not the assertion: the assertion is below, where
+		// the release happens and the completion is required.
 	}
 
 	pending.End()
