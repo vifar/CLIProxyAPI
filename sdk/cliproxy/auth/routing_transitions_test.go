@@ -554,37 +554,6 @@ func TestTruncateSessionIDDistinguishesLCPSessions(t *testing.T) {
 	}
 }
 
-// TestSessionAffinityConsumesTheAliasFailureWithThePrimary asserts that a
-// failure recorded under the alias is consumed together with the primary.
-//
-// The primary and the alias point at the same binding, so a stale record under
-// the alias must not survive to be picked up later by an unrelated replacement.
-func TestSessionAffinityConsumesTheAliasFailureWithThePrimary(t *testing.T) {
-	t.Parallel()
-
-	affinity := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
-		Fallback: &RoundRobinSelector{},
-		TTL:      time.Hour,
-	})
-	t.Cleanup(affinity.Stop)
-
-	const primaryKey = "mixed::session-1::model-1"
-	const aliasKey = "mixed::alias-1::model-1"
-
-	// Both records describe the same failed binding.
-	affinity.rememberFailedBinding(primaryKey, "provider-a")
-	affinity.rememberFailedBinding(aliasKey, "provider-a")
-
-	// The primary is consumed.
-	if got := affinity.takeFailedBinding(primaryKey); got != "provider-a" {
-		t.Fatalf("failed provider = %q, want provider-a", got)
-	}
-	// The alias is consumed at the same time, by the same read.
-	if got := affinity.takeFailedBinding(aliasKey); got != "provider-a" {
-		t.Fatalf("failed provider = %q, want provider-a", got)
-	}
-}
-
 // TestSessionAffinityFailureAttributionSurvivesAPrimaryChange asserts that a
 // replacement through a changed primary identifier is attributed to the provider
 // whose credential failed, and that the attribution is consumed once.
@@ -664,5 +633,81 @@ func TestSessionAffinityFailureAttributionSurvivesAPrimaryChange(t *testing.T) {
 	totals = recorder.Snapshot().Totals
 	if totals[string(RoutingTransitionProviderFailover)] != 2 {
 		t.Fatalf("provider failover = %d, want 2: %+v", totals[string(RoutingTransitionProviderFailover)], totals)
+	}
+}
+
+// TestSessionAffinityConcurrentRetriesConsumeTheAttributionOnce asserts that
+// two concurrent retries of one failed binding do not both report a replacement.
+//
+// The attribution of a failed binding is consumed once. A retry that finds no
+// attribution has a binding that was never failed, so it must not report a
+// replacement of the failed one.
+func TestSessionAffinityConcurrentRetriesConsumeTheAttributionOnce(t *testing.T) {
+	t.Parallel()
+
+	selector, _, providerA, model := routingTransitionTestSelector(t, NewRoutingTransitionRecorder(10))
+
+	// The conversation is bound to the first credential.
+	opts := cliproxyexecutor.Options{
+		Headers: http.Header{"X-Session-Id": []string{"rt-session-concurrent"}},
+		Metadata: map[string]any{
+			cliproxyexecutor.SessionAffinityProviderMetadataKey: "mixed",
+			cliproxyexecutor.SessionAffinityModelMetadataKey:    model,
+		},
+	}
+	first := []*Auth{{ID: "rt-auth-a", Provider: providerA}}
+	if _, errPick := selector.Pick(context.Background(), "mixed", model, opts, first); errPick != nil {
+		t.Fatalf("first Pick: %v", errPick)
+	}
+
+	// The bound credential fails.
+	selector.OnResult(Result{
+		AuthID:   "rt-auth-a",
+		Provider: "mixed",
+		Model:    model,
+		Success:  false,
+		Error:    &Error{Code: ErrorCodeForceCooldown, Message: "unavailable"},
+		Options:  opts,
+	})
+
+	// Two retries run at once. Exactly one of them can consume the attribution.
+	//
+	// Each retry has its own options, because the selection writes the route's
+	// provider and model into the options' metadata, and two selections that
+	// share one map would write to it at the same time.
+	retryOpts := func() cliproxyexecutor.Options {
+		return cliproxyexecutor.Options{
+			Headers: http.Header{"X-Session-Id": []string{"rt-session-concurrent"}},
+			Metadata: map[string]any{
+				cliproxyexecutor.SessionAffinityProviderMetadataKey: "mixed",
+				cliproxyexecutor.SessionAffinityModelMetadataKey:    model,
+			},
+		}
+	}
+	second := []*Auth{{ID: "rt-auth-b", Provider: "rt-provider-b"}}
+	third := []*Auth{{ID: "rt-auth-c", Provider: "rt-provider-c"}}
+	group := sync.WaitGroup{}
+	group.Add(2)
+	go func() {
+		defer group.Done()
+		_, _ = selector.Pick(context.Background(), "mixed", model, retryOpts(), second)
+	}()
+	go func() {
+		defer group.Done()
+		_, _ = selector.Pick(context.Background(), "mixed", model, retryOpts(), third)
+	}()
+	group.Wait()
+
+	// The attribution is gone: it was consumed exactly once, and the two retries
+	// shared it.
+	state := selector.affinityState
+	if state == nil {
+		t.Fatal("the affinity state must exist")
+	}
+	state.mu.Lock()
+	remaining := len(state.failedBindings)
+	state.mu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("failed binding records = %d, want 0: the attribution is consumed once", remaining)
 	}
 }

@@ -1274,15 +1274,22 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	// another provider. The bound credential may have left the eligible set
 	// entirely, so the provider cannot always be recovered from the available
 	// candidates.
-	bind := func(authID string) {
+	// bindLocked writes the binding and remembers its provider. The caller holds
+	// the affinity state's lock.
+	bindLocked := func(state *sessionAffinityState, authID string) {
 		if fallbackKey != "" && !isSubagent && !isFork {
 			s.cache.SetAliases(authID, cacheKey, fallbackKey)
 		} else {
 			s.cache.Set(cacheKey, authID)
 		}
 		if providerKey := s.routingProviderKeyForAuthID(authID, availabilityCandidates); providerKey != "" {
-			s.rememberBoundProvider(authID, providerKey)
+			s.rememberBoundProviderLocked(state, authID, providerKey)
 		}
+	}
+	bind := func(authID string) {
+		s.withAffinityState(func(state *sessionAffinityState) {
+			bindLocked(state, authID)
+		})
 	}
 	// The provider an existing binding pointed at is captured before the binding
 	// is written, because writing the binding replaces the alias and removes the
@@ -1301,13 +1308,29 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	if cachedAuthID, ok := s.cache.GetAndRefresh(cacheKey); ok {
 		for _, auth := range available {
 			if auth.ID == cachedAuthID {
-				bind(auth.ID)
+				// A hit can still be the retry of a failed binding, so the
+				// attribution decides the transition. It is consumed with the
+				// binding written, under one lock.
+				transition := RoutingTransitionBindingHit
+				previousProvider := ""
+				s.withAffinityState(func(state *sessionAffinityState) {
+					if failed := s.takeFailedBindingLocked(state, cacheKey); failed != "" {
+						transition = RoutingTransitionCredentialReselected
+						previousProvider = failed
+					}
+					bindLocked(state, auth.ID)
+				})
 				entry.Infof("session-affinity: cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
+				newProvider := s.routingProviderKey(auth)
+				if transition == RoutingTransitionCredentialReselected && newProvider != "" && previousProvider != "" && newProvider != previousProvider {
+					transition = RoutingTransitionProviderFailover
+				}
 				recordRoutingTransition(ctx, RoutingTransitionEvent{
-					Transition: RoutingTransitionBindingHit,
-					Model:      model,
-					Provider:   s.routingProviderKey(auth),
-					Session:    primaryID,
+					Transition:       transition,
+					Model:            model,
+					Provider:         newProvider,
+					PreviousProvider: previousProvider,
+					Session:          primaryID,
 				})
 				return auth, nil
 			}
@@ -1325,12 +1348,32 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 			entry.Infof("session-affinity: cache hit but auth transiently unavailable, failover without rebinding | session=%s bound_auth=%s failover_auth=%s provider=%s model=%s", truncateSessionID(primaryID), cachedAuthID, auth.ID, provider, model)
 			return auth, nil
 		}
-		bind(auth.ID)
+		// The bound credential was unavailable. The replacement is attributed to
+		// the provider the failed credential belonged to, and the attribution is
+		// consumed and the binding written as one step.
+		//
+		// The attribution of a failed binding is consumed once, and it is the only
+		// signal that this is a replacement. A concurrent retry that finds no
+		// attribution has a binding that was never failed, so it is a creation of
+		// a new binding rather than a second replacement.
+		var previousProvider string
+		s.withAffinityState(func(state *sessionAffinityState) {
+			// The attribution of a failed credential describes the provider the
+			// failure came from. A binding whose credential merely left the
+			// available set is described by the remembered provider.
+			previousProvider = s.takeFailedBindingLocked(state, cacheKey)
+			if previousProvider == "" {
+				previousProvider = state.boundProviders[cachedAuthID]
+			}
+			if previousProvider == "" {
+				previousProvider = s.routingProviderKeyForAuthID(cachedAuthID, availabilityCandidates)
+			}
+			bindLocked(state, auth.ID)
+		})
 		entry.Infof("session-affinity: cache hit but auth unavailable, reselected | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
-		// The bound credential was unavailable. When the replacement belongs to the
-		// same provider it is a credential reselection; when it belongs to another
-		// provider it is a provider failover and the binding was replaced.
-		previousProvider := s.boundProviderFor(cachedAuthID, availabilityCandidates)
+		// When the replacement belongs to the same provider it is a credential
+		// reselection; when it belongs to another provider it is a provider
+		// failover and the binding was replaced.
 		newProvider := s.routingProviderKey(auth)
 		transition := RoutingTransitionCredentialReselected
 		if previousProvider != "" && newProvider != "" && previousProvider != newProvider {
@@ -1382,18 +1425,15 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		}
 	}
 
-	// The attribution is consumed before the binding is written. A concurrent
-	// retry that bound first would otherwise consume the attribution itself and
-	// report a creation, while this request reported the replacement: the two
-	// replacements of one failed binding would be reported as one replacement and
-	// one creation.
-	var failedProvider string
-	if fallbackKey != "" && !isSubagent && !isFork {
-		failedProvider = s.takeFailedBindingForBinding(cacheKey, fallbackKey)
-	} else {
-		failedProvider = s.takeFailedBinding(cacheKey)
-	}
-
+	// The attribution is consumed and the binding written as one step, under the
+	// affinity state's lock.
+	//
+	// Two concurrent retries could both observe a miss. The first consumed the
+	// attribution and paused, the second consumed nothing and bound a credential
+	// as a creation, and the first then bound another one and reported the
+	// replacement: the two replacements of one failed binding were reported as
+	// one replacement and one creation. Holding the lock across the consumption
+	// and the binding makes them one step.
 	auth, err := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
 	if err != nil {
 		return nil, err
@@ -1401,7 +1441,22 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	if auth == nil {
 		return nil, nil
 	}
-	bind(auth.ID)
+	var failedProvider string
+	s.withAffinityState(func(state *sessionAffinityState) {
+		if fallbackKey != "" && !isSubagent && !isFork {
+			failedProvider = s.takeFailedBindingLocked(state, fallbackKey)
+			if failedProvider == "" {
+				failedProvider = s.takeFailedBindingLocked(state, cacheKey)
+			} else {
+				// The primary's record is cleared even when the alias carried the
+				// attribution.
+				s.takeFailedBindingLocked(state, cacheKey)
+			}
+		} else {
+			failedProvider = s.takeFailedBindingLocked(state, cacheKey)
+		}
+		bindLocked(state, auth.ID)
+	})
 	if isFork && fallbackID != "" {
 		entry.Infof("session-affinity: fork bound to new auth | session=%s parent=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
 	} else {
@@ -1435,10 +1490,27 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		//
 		// An existing binding that points at the credential being bound is not a
 		// replacement: the session stays with the credential it had.
+		//
+		// A binding that pointed at a credential which is no longer available is
+		// a replacement. The attribution of a failed credential describes the
+		// provider the failure came from; a binding whose credential merely left
+		// the available set is described by the remembered provider.
+		//
+		// The replacement is recorded once. The attribution of the failed binding
+		// is the signal for it, and a concurrent retry that consumed it finds a
+		// binding that was never failed.
 		if replacedAliasAuthID != "" && replacedAliasAuthID != auth.ID {
 			transition = RoutingTransitionCredentialReselected
 			previousProvider = replacedAliasProvider
-			if newProvider != "" && newProvider != previousProvider {
+			if failedProvider != "" {
+				previousProvider = failedProvider
+			} else if !s.failedBindingConsumed(cacheKey, fallbackKey) {
+				// The attribution was already consumed by a concurrent retry, so
+				// this one is not a replacement of the failed binding.
+				transition = RoutingTransitionBindingCreated
+				previousProvider = ""
+			}
+			if transition == RoutingTransitionCredentialReselected && newProvider != "" && newProvider != previousProvider {
 				transition = RoutingTransitionProviderFailover
 			}
 		}
@@ -1476,6 +1548,30 @@ func (s *SessionAffinitySelector) replacedAliasProvider(cacheKey, fallbackKey st
 		}
 	}
 	return "", ""
+}
+
+// failedBindingConsumed reports whether a failed binding's attribution was
+// already consumed.
+//
+// The attribution is consumed once, so a concurrent retry that finds none has a
+// binding that was never failed and must not report a replacement of it.
+func (s *SessionAffinitySelector) failedBindingConsumed(cacheKey, fallbackKey string) bool {
+	state := s.affinityState
+	if state == nil {
+		return false
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	keys := []string{cacheKey}
+	if fallbackKey != "" && fallbackKey != cacheKey {
+		keys = append(keys, fallbackKey)
+	}
+	for _, key := range keys {
+		if _, ok := state.failedBindings[key]; ok {
+			return false
+		}
+	}
+	return true
 }
 
 // routingProviderKey returns the provider key a selected auth belongs to.
@@ -1685,6 +1781,25 @@ func (s *SessionAffinitySelector) takeFailedBindingLocked(state *sessionAffinity
 	return record.provider
 }
 
+// withAffinityState runs an operation under the affinity state's lock.
+//
+// The lock is the affinity boundary: the state it guards is what a routing
+// transition reads and writes, so a lookup, a binding mutation and a
+// classification that belong together run under it.
+func (s *SessionAffinitySelector) withAffinityState(operation func(state *sessionAffinityState)) {
+	if s == nil {
+		return
+	}
+	state := s.affinityState
+	if state == nil {
+		operation(nil)
+		return
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	operation(state)
+}
+
 // takeFailedBinding returns and clears the provider recorded for a failed binding.
 func (s *SessionAffinitySelector) takeFailedBinding(bindingKey string) string {
 	if s == nil || bindingKey == "" {
@@ -1860,11 +1975,20 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 			}
 		}
 	}
-	// The attribution is consumed before the sequence is bound. A concurrent
-	// retry that bound first would otherwise consume the attribution itself and
-	// report a creation, while this request reported the replacement.
-	lcpFailedProvider := s.takeFailedBinding(lcpFailedBindingKey(namespace, cliproxysession.SequenceIdentity(fingerprints)))
-	if bindRes := s.matcher.BindFingerprintsWithContext(namespace, fingerprints, tailFingerprints, envDigest, minPrefixLength, bindAuthID); bindRes.SessionID != "" {
+	// The attribution is consumed and the sequence bound as one step, under the
+	// affinity state's lock.
+	//
+	// Two concurrent retries could both observe a miss. The first consumed the
+	// attribution and paused, the second consumed nothing and bound a sequence as
+	// a creation, and the first then bound another one and reported the
+	// replacement.
+	var lcpFailedProvider string
+	var bindRes cliproxysession.MerklePrefixBindResult
+	s.withAffinityState(func(state *sessionAffinityState) {
+		lcpFailedProvider = s.takeFailedBindingLocked(state, lcpFailedBindingKey(namespace, cliproxysession.SequenceIdentity(fingerprints)))
+		bindRes = s.matcher.BindFingerprintsWithContext(namespace, fingerprints, tailFingerprints, envDigest, minPrefixLength, bindAuthID)
+	})
+	if bindRes.SessionID != "" {
 		opts.Metadata[cliproxyexecutor.LCPAffinitySessionIDMetadataKey] = bindRes.SessionID
 		opts.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey] = bindRes.SessionID
 		if bindRes.ParentSessionID != "" {
