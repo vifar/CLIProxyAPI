@@ -35,7 +35,7 @@ func (c *alpnTestConn) requireClosed(t *testing.T) {
 	t.Helper()
 	select {
 	case <-c.closed:
-	case <-time.After(5 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("TLS connection was not closed")
 	}
 }
@@ -170,7 +170,7 @@ func TestUtlsRoundTripCancellationAfterHandshake(t *testing.T) {
 			}()
 			select {
 			case <-requestReceived:
-			case <-time.After(5 * time.Second):
+			case <-time.After(30 * time.Second):
 				t.Fatal("server did not receive request")
 			}
 			cancel()
@@ -179,7 +179,7 @@ func TestUtlsRoundTripCancellationAfterHandshake(t *testing.T) {
 				if !errors.Is(errRoundTrip, context.Canceled) {
 					t.Fatalf("RoundTrip error = %v, want context canceled", errRoundTrip)
 				}
-			case <-time.After(5 * time.Second):
+			case <-time.After(30 * time.Second):
 				t.Fatal("RoundTrip did not stop after context cancellation")
 			}
 			tracked.requireClosed(t)

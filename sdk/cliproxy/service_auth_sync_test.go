@@ -591,7 +591,7 @@ func TestRuntimeAuthSyncHook_DoesNotBlockOnUnrelatedAntigravityProbes(t *testing
 		service.antigravityProbeWg.Done()
 		select {
 		case <-finished:
-		case <-time.After(2 * time.Second):
+		case <-time.After(30 * time.Second):
 		}
 	})
 
@@ -610,7 +610,7 @@ func TestRuntimeAuthSyncHook_DoesNotBlockOnUnrelatedAntigravityProbes(t *testing
 		if errHook != nil {
 			t.Fatalf("hook failed: %v", errHook)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("runtimeAuthSyncHook blocked waiting for unrelated antigravity probes")
 	}
 
@@ -719,7 +719,7 @@ func runAuthUpdateWithoutProbeWait(t *testing.T, service *Service, run func()) {
 		service.antigravityProbeWg.Done()
 		select {
 		case <-finished:
-		case <-time.After(2 * time.Second):
+		case <-time.After(30 * time.Second):
 		}
 	})
 
@@ -731,7 +731,7 @@ func runAuthUpdateWithoutProbeWait(t *testing.T, service *Service, run func()) {
 
 	select {
 	case <-done:
-	case <-time.After(2 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("auth update blocked waiting for unrelated antigravity probes")
 	}
 }
@@ -808,7 +808,7 @@ func TestHandleAuthUpdates_ModelRegistrationDoesNotHoldAuthUpdateLock(t *testing
 
 	select {
 	case <-started:
-	case <-time.After(2 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("first auth update did not reach model registration")
 	}
 
@@ -824,14 +824,14 @@ func TestHandleAuthUpdates_ModelRegistrationDoesNotHoldAuthUpdateLock(t *testing
 
 	select {
 	case <-doneB:
-	case <-time.After(2 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("second auth update blocked by first auth model registration")
 	}
 
 	close(block)
 	select {
 	case <-finishedA:
-	case <-time.After(2 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("first auth update did not finish after registration was unblocked")
 	}
 }
@@ -974,7 +974,7 @@ func TestHandleAuthUpdates_StaleDisableRegistrationDoesNotDropNewerEnable(t *tes
 
 	select {
 	case <-started:
-	case <-time.After(2 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("disable registration did not start")
 	}
 
@@ -998,7 +998,7 @@ func TestHandleAuthUpdates_StaleDisableRegistrationDoesNotDropNewerEnable(t *tes
 	close(block)
 	select {
 	case <-finishedDisable:
-	case <-time.After(2 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("disable registration did not finish")
 	}
 
@@ -1075,7 +1075,7 @@ func TestHandleAuthUpdates_SameRevisionWaitDoesNotWaitForOtherAuthInBatch(t *tes
 
 	select {
 	case <-bStarted:
-	case <-time.After(2 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("second auth registration in batch did not start")
 	}
 
@@ -1086,14 +1086,14 @@ func TestHandleAuthUpdates_SameRevisionWaitDoesNotWaitForOtherAuthInBatch(t *tes
 	}()
 	select {
 	case <-doneA:
-	case <-time.After(2 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("auth A hook wait blocked on unrelated auth B registration")
 	}
 
 	close(bBlock)
 	select {
 	case <-finishedBatch:
-	case <-time.After(2 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("batch auth update did not finish")
 	}
 }

@@ -214,6 +214,10 @@ const codexWebsocketWriteChunkSize = 32 * 1024
 var (
 	testWebsocketWritePayloadHook func(conn *websocket.Conn)
 	testWebsocketWriteChunkHook   func(chunkIndex int, totalChunks int)
+	// testWebsocketWriteCompleteHook is called after a payload write has finished.
+	// A test that holds a write open uses it to learn when the client is done,
+	// so the server does not close the connection while the write is in flight.
+	testWebsocketWriteCompleteHook func()
 )
 
 func (s *codexWebsocketSession) writeMessage(conn *websocket.Conn, msgType int, payload []byte) error {
@@ -229,7 +233,11 @@ func (s *codexWebsocketSession) writeMessage(conn *websocket.Conn, msgType int, 
 		testWebsocketWritePayloadHook(conn)
 	}
 	if len(payload) <= codexWebsocketWriteChunkSize {
-		return conn.WriteMessage(msgType, payload)
+		errWrite := conn.WriteMessage(msgType, payload)
+		if testWebsocketWriteCompleteHook != nil {
+			testWebsocketWriteCompleteHook()
+		}
+		return errWrite
 	}
 	w, errNext := conn.NextWriter(msgType)
 	if errNext != nil {
