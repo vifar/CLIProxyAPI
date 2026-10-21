@@ -18,6 +18,10 @@ type openAICompatibilityRegistrationCache struct {
 	cfg     *config.Config
 	byName  map[string]*openAICompatibilityRegistrationEntry
 	byIndex map[int]*openAICompatibilityRegistrationEntry
+	// catalogGeneration is the generation of the live model lists the cache was
+	// built at. The cache is discarded when the generation has moved on, so a
+	// batch that started before a discovery cannot apply a stale model list.
+	catalogGeneration uint64
 }
 
 // pluginHostHasAuthProvider is overridable in tests to avoid loading real plugins.
@@ -48,9 +52,10 @@ func newOpenAICompatibilityRegistrationCacheForConfig(cfg *config.Config, manage
 	}
 
 	cache := &openAICompatibilityRegistrationCache{
-		cfg:     cfg,
-		byName:  make(map[string]*openAICompatibilityRegistrationEntry, len(cfg.OpenAICompatibility)),
-		byIndex: make(map[int]*openAICompatibilityRegistrationEntry, len(cfg.OpenAICompatibility)),
+		cfg:               cfg,
+		byName:            make(map[string]*openAICompatibilityRegistrationEntry, len(cfg.OpenAICompatibility)),
+		byIndex:           make(map[int]*openAICompatibilityRegistrationEntry, len(cfg.OpenAICompatibility)),
+		catalogGeneration: manager.generationOf(),
 	}
 	for i := range cfg.OpenAICompatibility {
 		compat := &cfg.OpenAICompatibility[i]
@@ -73,7 +78,7 @@ func newOpenAICompatibilityRegistrationCacheForConfig(cfg *config.Config, manage
 			// here, at the registration boundary, rather than in the configuration.
 			// The configuration is the operator's, and a discovered row written back
 			// would become a permanent pin.
-			models: buildOpenAICompatibilityConfigModels(manager.modelsFor(i, compat, cfg.ProxyURL)),
+			models: buildOpenAICompatibilityConfigModels(manager.modelsFor(i, compat, compatCatalogEffectiveProxy(cfg, compat))),
 		}
 		cache.byIndex[i] = entry
 		if _, exists := cache.byName[key]; !exists {

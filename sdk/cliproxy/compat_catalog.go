@@ -98,6 +98,11 @@ type compatCatalogManager struct {
 	// inFlight holds the entries whose live read is in progress, so a provider
 	// that never answers does not accumulate a request per interval.
 	inFlight map[string]struct{}
+	// generation counts the changes to the live model lists. A registration
+	// cache records the generation it was built at, and is discarded when the
+	// generation has moved on, so a batch that started before a discovery
+	// cannot apply a stale model list.
+	generation uint64
 	// publishMu serializes the publications, so a publication that started before a
 	// newer one cannot register a stale list after it.
 	publishMu sync.Mutex
@@ -215,6 +220,32 @@ func (m *compatCatalogManager) endRead(target compatCatalogTarget) {
 	delete(m.inFlight, target.key())
 }
 
+// compatCatalogEffectiveProxy returns the proxy a provider's live model list is
+// read through.
+//
+// A per-key proxy overrides the global one, the same way the credential's own
+// requests resolve it. The refresh and the registration must resolve it the same
+// way, or a provider read through its per-key proxy would never publish its
+// models.
+func compatCatalogEffectiveProxy(cfg *config.Config, provider *config.OpenAICompatibility) string {
+	proxyURL := ""
+	if cfg != nil {
+		proxyURL = strings.TrimSpace(cfg.ProxyURL)
+	}
+	if provider == nil {
+		return proxyURL
+	}
+	for _, entry := range provider.APIKeyEntries {
+		if key := strings.TrimSpace(entry.APIKey); key != "" {
+			if keyProxy := strings.TrimSpace(entry.ProxyURL); keyProxy != "" {
+				return keyProxy
+			}
+			break
+		}
+	}
+	return proxyURL
+}
+
 // compatCatalogTargets returns the configured entries whose live model list is
 // supported.
 func compatCatalogTargets(cfg *config.Config) []compatCatalogTarget {
@@ -232,16 +263,13 @@ func compatCatalogTargets(cfg *config.Config) []compatCatalogTarget {
 			continue
 		}
 		apiKey := ""
-		proxyURL := strings.TrimSpace(cfg.ProxyURL)
 		for _, entry := range provider.APIKeyEntries {
 			if key := strings.TrimSpace(entry.APIKey); key != "" {
 				apiKey = key
-				if keyProxy := strings.TrimSpace(entry.ProxyURL); keyProxy != "" {
-					proxyURL = keyProxy
-				}
 				break
 			}
 		}
+		proxyURL := compatCatalogEffectiveProxy(cfg, provider)
 		targets = append(targets, compatCatalogTarget{
 			entryIndex: index,
 			name:       strings.TrimSpace(provider.Name),
@@ -253,41 +281,34 @@ func compatCatalogTargets(cfg *config.Config) []compatCatalogTarget {
 	return targets
 }
 
-// refreshProvider reads one provider's live model list and stores it. It reports
-// whether the list changed.
-func (m *compatCatalogManager) refreshProvider(ctx context.Context, target compatCatalogTarget) bool {
+// refreshProvider reads one provider's live model list and stores it.
+func (m *compatCatalogManager) refreshProvider(ctx context.Context, target compatCatalogTarget) {
 	if target.name == "" {
-		return false
+		return
 	}
 	models, errList := config.CompatCatalogModelList(ctx, target.baseURL, target.apiKey, target.proxyURL, m.fetcher)
 	if errList != nil {
 		// A failed refresh keeps the last known good list.
 		log.WithError(errList).Warnf("compat catalog: live model list unavailable for provider %s", target.name)
-		return false
+		return
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	previous, existed := m.state[target.key()]
-	changed := !existed || !compatCatalogModelIDsEqual(previous.models, models)
 	m.state[target.key()] = &compatCatalogState{
 		target: target,
 		models: models,
 	}
-	return changed
+	m.generation++
 }
 
-// compatCatalogModelIDsEqual reports whether two live model lists carry the same
-// model identifiers.
-func compatCatalogModelIDsEqual(left, right []config.CompatCatalogModel) bool {
-	if len(left) != len(right) {
-		return false
+// generationOf returns the current generation of the live model lists.
+func (m *compatCatalogManager) generationOf() uint64 {
+	if m == nil {
+		return 0
 	}
-	for index := range left {
-		if left[index].ID != right[index].ID {
-			return false
-		}
-	}
-	return true
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.generation
 }
 
 // liveModelsFor returns the last known good live model list of one configured
@@ -317,41 +338,16 @@ func (m *compatCatalogManager) liveModelsFor(target compatCatalogTarget) []confi
 // let two entries that share a name receive each other's models, and a rotated
 // key or a changed proxy would leave the obsolete list in place.
 //
-// The position is the strongest identifier, so it is matched first. A caller
-// that does not know the position falls back to the name, the base URL, the key
-// and the proxy, and a negative position never matches a stored one.
+// The identity is exact. Both registration paths know the entry's position in
+// the configuration, so a partial match is not needed.
 func (m *compatCatalogManager) liveModelsForEntry(target compatCatalogTarget) []config.CompatCatalogModel {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if target.entryIndex >= 0 {
-		state, ok := m.state[target.key()]
-		if !ok || state == nil {
-			return nil
-		}
-		return state.models
+	state, ok := m.state[target.key()]
+	if !ok || state == nil {
+		return nil
 	}
-	for _, state := range m.state {
-		if state == nil {
-			continue
-		}
-		if !strings.EqualFold(state.target.name, strings.TrimSpace(target.name)) {
-			continue
-		}
-		if !strings.EqualFold(state.target.baseURL, strings.TrimSpace(target.baseURL)) {
-			continue
-		}
-		if target.apiKey != "" && state.target.apiKey != target.apiKey {
-			// The key was rotated, so this catalog belongs to the old key.
-			continue
-		}
-		if target.proxyURL != "" && state.target.proxyURL != target.proxyURL {
-			// The proxy was changed, so this catalog was read through the old
-			// proxy.
-			continue
-		}
-		return state.models
-	}
-	return nil
+	return state.models
 }
 
 // publishLiveModels publishes the live model lists to the model registry.

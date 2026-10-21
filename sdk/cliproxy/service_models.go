@@ -263,7 +263,7 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 				// here, at the registration boundary, rather than in the
 				// configuration. The configuration is the operator's, and a
 				// discovered row written back to it would become a permanent pin.
-				ms := buildOpenAICompatibilityConfigModels(s.compatModelsFor(entryIndex, compat, cfg.ProxyURL))
+				ms := buildOpenAICompatibilityConfigModels(s.compatModelsFor(entryIndex, compat, compatCatalogEffectiveProxy(cfg, compat)))
 				if providerKey == "" {
 					providerKey = "openai-compatibility"
 				}
@@ -280,7 +280,7 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 				}
 				return true
 			}
-			if compatCache != nil && compatCache.cfg == cfg {
+			if compatCache != nil && compatCache.cfg == cfg && s.compatCatalogCacheIsCurrent(compatCache) {
 				if cached, ok := compatCache.lookup(a, compatName); ok {
 					isCompatAuth = true
 					if providerKey == "" {
@@ -881,6 +881,26 @@ func (s *Service) compatCatalogManager() *compatCatalogManager {
 	s.cfgMu.RLock()
 	defer s.cfgMu.RUnlock()
 	return s.compatCatalog
+}
+
+// compatCatalogCacheIsCurrent reports whether a registration cache still holds
+// the live model lists.
+//
+// The cache is discarded when the live lists have changed since it was built, so
+// a registration batch that started before a discovery cannot apply a stale
+// model list. The caller then resolves the live models at the moment it
+// registers, which is where they belong.
+func (s *Service) compatCatalogCacheIsCurrent(cache *openAICompatibilityRegistrationCache) bool {
+	if cache == nil {
+		return false
+	}
+	manager := s.compatCatalogManager()
+	if manager == nil {
+		// The live model list is not in use, so nothing has changed since the
+		// cache was built.
+		return true
+	}
+	return cache.catalogGeneration == manager.generationOf()
 }
 
 // refreshCompatModelRegistration re-registers the OpenAI-compatible credentials
