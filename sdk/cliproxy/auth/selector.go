@@ -923,6 +923,11 @@ type SessionAffinitySelector struct {
 	// from the available candidates.
 	boundProvidersMu sync.Mutex
 	boundProviders   map[string]string
+
+	// failedBindings remembers the provider of a binding whose credential failed,
+	// so the retry that follows is reported as the replacement it is.
+	failedBindingsMu sync.Mutex
+	failedBindings   map[string]string
 }
 
 const (
@@ -1329,11 +1334,24 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	} else {
 		entry.Infof("session-affinity: cache miss, new binding | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
 	}
+	newProvider := s.routingProviderKey(auth)
+	transition := RoutingTransitionBindingCreated
+	previousProvider := ""
+	if failedProvider := s.takeFailedBinding(primaryID); failedProvider != "" {
+		// The credential this session was bound to failed, so this is the
+		// replacement of that binding rather than a new one.
+		transition = RoutingTransitionCredentialReselected
+		if newProvider != "" && newProvider != failedProvider {
+			transition = RoutingTransitionProviderFailover
+		}
+		previousProvider = failedProvider
+	}
 	recordRoutingTransition(ctx, RoutingTransitionEvent{
-		Transition: RoutingTransitionBindingCreated,
-		Model:      model,
-		Provider:   s.routingProviderKey(auth),
-		Session:    primaryID,
+		Transition:       transition,
+		Model:            model,
+		Provider:         newProvider,
+		PreviousProvider: previousProvider,
+		Session:          primaryID,
 	})
 	return auth, nil
 }
@@ -1400,6 +1418,35 @@ func (s *SessionAffinitySelector) boundProviderFor(authID string, candidates []*
 		return remembered
 	}
 	return s.routingProviderKeyForAuthID(authID, candidates)
+}
+
+// rememberFailedBinding records that a session's bound credential failed, so the
+// next selection for that session can be reported as the replacement it is.
+//
+// The record is keyed by the session, because the retry binds a different
+// credential. It is removed once it is reported, so one failure is reported once.
+func (s *SessionAffinitySelector) rememberFailedBinding(sessionID, providerKey string) {
+	if s == nil || sessionID == "" || providerKey == "" {
+		return
+	}
+	s.failedBindingsMu.Lock()
+	if s.failedBindings == nil {
+		s.failedBindings = make(map[string]string)
+	}
+	s.failedBindings[sessionID] = providerKey
+	s.failedBindingsMu.Unlock()
+}
+
+// takeFailedBinding returns and clears the provider recorded for a failed binding.
+func (s *SessionAffinitySelector) takeFailedBinding(sessionID string) string {
+	if s == nil || sessionID == "" {
+		return ""
+	}
+	s.failedBindingsMu.Lock()
+	providerKey := s.failedBindings[sessionID]
+	delete(s.failedBindings, sessionID)
+	s.failedBindingsMu.Unlock()
+	return providerKey
 }
 
 func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth, entry *log.Entry) (*Auth, bool, error) {
@@ -1510,12 +1557,18 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 	// The transition depends on whether the replacement belongs to the same provider
 	// as the matched binding or to another one.
 	//
+	// A preserved binding is not replaced at all: the session stays bound to its
+	// credential and the request is served by another one for now, so there is no
+	// replacement to report.
+	//
 	// The matched credential has left the available candidates, so its provider
 	// cannot be recovered from them. The selector remembers the provider a bound
 	// credential belongs to.
 	replacedProvider := ""
-	if match, ok := s.matcher.MatchFingerprintsWithContext(namespace, fingerprints, tailFingerprints, envDigest, minPrefixLength); ok {
-		replacedProvider = s.boundProviderFor(match.AuthID, available)
+	if preservedAuthID == "" {
+		if match, ok := s.matcher.MatchFingerprintsWithContext(namespace, fingerprints, tailFingerprints, envDigest, minPrefixLength); ok {
+			replacedProvider = s.boundProviderFor(match.AuthID, available)
+		}
 	}
 	if bindRes := s.matcher.BindFingerprintsWithContext(namespace, fingerprints, tailFingerprints, envDigest, minPrefixLength, bindAuthID); bindRes.SessionID != "" {
 		opts.Metadata[cliproxyexecutor.LCPAffinitySessionIDMetadataKey] = bindRes.SessionID
@@ -1915,6 +1968,15 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 		return
 	}
 
+	// The binding is about to be removed. Its provider is remembered, so the retry
+	// that follows can be reported as the replacement it is, rather than as a new
+	// binding.
+	if boundAuthID, okBound := s.cache.Get(cacheKey); okBound && boundAuthID != "" {
+		if providerKey := s.boundProviderFor(boundAuthID, nil); providerKey != "" {
+			s.rememberBoundProvider(boundAuthID, providerKey)
+			s.rememberFailedBinding(primaryID, providerKey)
+		}
+	}
 	s.cache.CompareAndDelete(cacheKey, res.AuthID)
 	if fallbackKey != "" {
 		s.cache.CompareAndDelete(fallbackKey, res.AuthID)

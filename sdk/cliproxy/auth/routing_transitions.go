@@ -277,7 +277,10 @@ func truncateRoutingTransitionKey(value string) string {
 		return ""
 	}
 	if len(trimmed) > maxRoutingTransitionKeyLength {
-		return trimmed[:maxRoutingTransitionKeyLength]
+		// The slice keeps the whole backing allocation, so the truncated value is
+		// copied out. A client that sends a very long model name must not be able
+		// to pin a large allocation per counter key.
+		return string([]byte(trimmed[:maxRoutingTransitionKeyLength]))
 	}
 	return trimmed
 }
