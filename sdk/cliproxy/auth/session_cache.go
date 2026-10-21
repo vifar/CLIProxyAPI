@@ -129,7 +129,7 @@ func (c *SessionCache) Get(sessionID string) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	if time.Now().Before(entry.expiresAt) {
+	if c.nowTime().Before(entry.expiresAt) {
 		return entry.authID, true
 	}
 	c.removeAliasGroupLocked(entry)

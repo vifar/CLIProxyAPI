@@ -3,9 +3,39 @@ package auth
 import (
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
+
+func TestSessionCache_GetUsesControlledClockAtExpiry(t *testing.T) {
+	t.Parallel()
+
+	const ttl = time.Minute
+	cache := NewSessionCache(ttl)
+	defer cache.Stop()
+	var now atomic.Int64
+	start := time.Date(2100, time.January, 1, 0, 0, 0, 0, time.UTC)
+	now.Store(start.UnixNano())
+	cache.SetClock(func() time.Time { return time.Unix(0, now.Load()) })
+	cache.SetAliases("auth-1", "session-1", "thread-1")
+
+	// Get must not refresh the TTL, and exact expiry invalidates every alias.
+	now.Store(start.Add(ttl / 2).UnixNano())
+	if got, ok := cache.Get("session-1"); !ok || got != "auth-1" {
+		t.Fatalf("Get() before expiry = %q, %v; want auth-1, true", got, ok)
+	}
+	now.Store(start.Add(ttl).UnixNano())
+	if got, ok := cache.Get("thread-1"); ok || got != "" {
+		t.Fatalf("Get() at expiry = %q, %v; want empty, false", got, ok)
+	}
+	if got := cache.Len(); got != 0 {
+		t.Fatalf("Len() after expiry = %d; want 0 aliases", got)
+	}
+	if got, ok := cache.Get("session-1"); ok || got != "" {
+		t.Fatalf("Get() for expired sibling alias = %q, %v; want empty, false", got, ok)
+	}
+}
 
 func TestSessionCache_CapacityEvictionOrder(t *testing.T) {
 	t.Parallel()

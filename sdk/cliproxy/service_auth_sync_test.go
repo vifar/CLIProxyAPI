@@ -1044,21 +1044,21 @@ func TestHandleAuthUpdates_SameRevisionWaitDoesNotWaitForOtherAuthInBatch(t *tes
 
 	service := &Service{cfg: &config.Config{}, coreManager: manager}
 
-	bStarted := make(chan struct{})
-	bBlock := make(chan struct{})
+	blockedStarted := make(chan struct{})
+	registrationBlock := make(chan struct{})
 	var started atomic.Int32
 	modelRegistrationTaskHook = func() {
 		if started.Add(1) == 2 {
-			close(bStarted)
-			<-bBlock
+			close(blockedStarted)
+			<-registrationBlock
 		}
 	}
 	t.Cleanup(func() {
 		modelRegistrationTaskHook = nil
 		select {
-		case <-bBlock:
+		case <-registrationBlock:
 		default:
-			close(bBlock)
+			close(registrationBlock)
 		}
 	})
 
@@ -1074,23 +1074,36 @@ func TestHandleAuthUpdates_SameRevisionWaitDoesNotWaitForOtherAuthInBatch(t *tes
 	}()
 
 	select {
-	case <-bStarted:
+	case <-blockedStarted:
 	case <-time.After(30 * time.Second):
 		t.Fatal("second auth registration in batch did not start")
 	}
 
-	doneA := make(chan struct{})
-	go func() {
-		service.handleAuthUpdate(context.Background(), updateA)
-		close(doneA)
-	}()
+	// Workers may enter the hook in either order. One registration can finish
+	// while the other is blocked, so its same-revision update must return
+	// independently of the rest of the batch.
+	completed := make(chan string, 2)
+	for _, update := range []watcher.AuthUpdate{updateA, updateB} {
+		go func(update watcher.AuthUpdate) {
+			service.handleAuthUpdate(context.Background(), update)
+			completed <- update.ID
+		}(update)
+	}
 	select {
-	case <-doneA:
+	case authID := <-completed:
+		if len(reg.GetModelsForClient(authID)) == 0 {
+			t.Fatalf("same-revision update returned before models were registered for %s", authID)
+		}
 	case <-time.After(30 * time.Second):
-		t.Fatal("auth A hook wait blocked on unrelated auth B registration")
+		t.Fatal("same-revision updates both blocked on the unfinished batch")
 	}
 
-	close(bBlock)
+	close(registrationBlock)
+	select {
+	case <-completed:
+	case <-time.After(30 * time.Second):
+		t.Fatal("remaining same-revision update did not finish after registration was unblocked")
+	}
 	select {
 	case <-finishedBatch:
 	case <-time.After(30 * time.Second):
