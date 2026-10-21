@@ -269,23 +269,6 @@ func MergeCompatCatalogModels(configured []OpenAICompatibilityModel, live []Comp
 	return merged
 }
 
-// ReconcileCompatCatalogModels replaces the models a provider's live list
-// contributed with the models its current live list reports.
-//
-// The configured list is the operator's floor: a model the operator wrote down
-// stays, whatever the provider reports. A model that was only ever discovered
-// live is removed once the provider stops listing it, so the live list is a live
-// list rather than a one-way accumulation. An operator who wants such a model
-// kept writes it into the configured list, where it is explicit.
-//
-// The live contribution is not marked in the configuration. The caller keeps the
-// operator's configured rows and the live list apart, and this merge is applied to
-// the operator's rows every time, so a discovered row can never become a
-// permanent pin by being written back to the configuration file.
-func ReconcileCompatCatalogModels(configured []OpenAICompatibilityModel, live []CompatCatalogModel, excluded []string) []OpenAICompatibilityModel {
-	return MergeCompatCatalogModels(configured, live, excluded)
-}
-
 // CompatCatalogModelExcluded reports whether a model ID matches one of the
 // provider's exclusion patterns.
 //

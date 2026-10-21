@@ -333,7 +333,7 @@ func TestMergeCompatCatalogModelsKeepsConfiguredRowsWhenOnlyLiveModelsAreKnown(t
 	}
 }
 
-func TestReconcileCompatCatalogModelsDropsAModelTheProviderStoppedListing(t *testing.T) {
+func TestMergeCompatCatalogModelsDropsAModelTheProviderStoppedListing(t *testing.T) {
 	t.Parallel()
 
 	// The operator wrote one model down; the provider listed two more.
@@ -343,7 +343,7 @@ func TestReconcileCompatCatalogModelsDropsAModelTheProviderStoppedListing(t *tes
 	}
 	live := []CompatCatalogModel{{ID: "discovered-a"}, {ID: "discovered-c"}}
 
-	merged := ReconcileCompatCatalogModels(configured, live, nil)
+	merged := MergeCompatCatalogModels(configured, live, nil)
 	names := make([]string, 0, len(merged))
 	for _, model := range merged {
 		names = append(names, model.Name)
@@ -361,7 +361,7 @@ func TestReconcileCompatCatalogModelsDropsAModelTheProviderStoppedListing(t *tes
 	}
 }
 
-func TestReconcileCompatCatalogModelsKeepsAnOperatorAlias(t *testing.T) {
+func TestMergeCompatCatalogModelsKeepsAnOperatorAlias(t *testing.T) {
 	t.Parallel()
 
 	// The operator pinned an alias for a model the provider also lists. The pin
@@ -371,7 +371,7 @@ func TestReconcileCompatCatalogModelsKeepsAnOperatorAlias(t *testing.T) {
 	}
 	live := []CompatCatalogModel{{ID: "shared-upstream"}, {ID: "discovered-a"}}
 
-	merged := ReconcileCompatCatalogModels(configured, live, nil)
+	merged := MergeCompatCatalogModels(configured, live, nil)
 	found := false
 	for _, model := range merged {
 		if model.Alias == "friendly-alias" {

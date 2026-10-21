@@ -62,7 +62,14 @@ func newOpenAICompatibilityRegistrationCacheForConfig(cfg *config.Config, manage
 		if compat.Disabled {
 			continue
 		}
+		// A provider entry may be unnamed. The credential synthesis falls back
+		// to "openai-compatibility" for it, so the identity has to fall back the
+		// same way, or the entry would be published under a different name than
+		// the one it is routed by.
 		compatName := strings.TrimSpace(compat.Name)
+		if compatName == "" {
+			compatName = "openai-compatibility"
+		}
 		key := strings.ToLower(compatName)
 		providerName := strings.ToLower(compatName)
 		if providerName == "" {

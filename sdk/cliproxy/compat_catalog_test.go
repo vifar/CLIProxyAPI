@@ -110,16 +110,16 @@ func TestCompatCatalogLiveModelsAreMatchedByTheFullTargetIdentity(t *testing.T) 
 		t.Fatalf("merged models = %+v, want none for a changed proxy", merged.Models)
 	}
 	// The obsolete identities are not reachable.
-	if live := manager.liveModelsFor(second); len(live) != 0 {
+	if live := manager.liveModelsForEntry(second); len(live) != 0 {
 		t.Fatalf("live models = %+v, want none for a different entry", live)
 	}
-	if live := manager.liveModelsFor(third); len(live) != 0 {
+	if live := manager.liveModelsForEntry(third); len(live) != 0 {
 		t.Fatalf("live models = %+v, want none for a different base URL", live)
 	}
-	if live := manager.liveModelsFor(rotated); len(live) != 0 {
+	if live := manager.liveModelsForEntry(rotated); len(live) != 0 {
 		t.Fatalf("live models = %+v, want none for a rotated key", live)
 	}
-	if live := manager.liveModelsFor(proxied); len(live) != 0 {
+	if live := manager.liveModelsForEntry(proxied); len(live) != 0 {
 		t.Fatalf("live models = %+v, want none for a changed proxy", live)
 	}
 }

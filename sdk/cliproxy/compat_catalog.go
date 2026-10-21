@@ -246,6 +246,19 @@ func compatCatalogEffectiveProxy(cfg *config.Config, provider *config.OpenAIComp
 	return proxyURL
 }
 
+// compatCatalogProviderName returns a provider entry's name.
+//
+// A provider entry may be unnamed: the credential synthesis falls back to
+// "openai-compatibility" for it. The entry is still discovered and still
+// published, so every place that forms the entry's identity falls back the same
+// way.
+func compatCatalogProviderName(name string) string {
+	if trimmed := strings.TrimSpace(name); trimmed != "" {
+		return trimmed
+	}
+	return "openai-compatibility"
+}
+
 // compatCatalogTargets returns the configured entries whose live model list is
 // supported.
 func compatCatalogTargets(cfg *config.Config) []compatCatalogTarget {
@@ -272,7 +285,7 @@ func compatCatalogTargets(cfg *config.Config) []compatCatalogTarget {
 		proxyURL := compatCatalogEffectiveProxy(cfg, provider)
 		targets = append(targets, compatCatalogTarget{
 			entryIndex: index,
-			name:       strings.TrimSpace(provider.Name),
+			name:       compatCatalogProviderName(provider.Name),
 			baseURL:    baseURL,
 			apiKey:     apiKey,
 			proxyURL:   proxyURL,
@@ -283,13 +296,10 @@ func compatCatalogTargets(cfg *config.Config) []compatCatalogTarget {
 
 // refreshProvider reads one provider's live model list and stores it.
 func (m *compatCatalogManager) refreshProvider(ctx context.Context, target compatCatalogTarget) {
-	if target.name == "" {
-		return
-	}
 	models, errList := config.CompatCatalogModelList(ctx, target.baseURL, target.apiKey, target.proxyURL, m.fetcher)
 	if errList != nil {
 		// A failed refresh keeps the last known good list.
-		log.WithError(errList).Warnf("compat catalog: live model list unavailable for provider %s", target.name)
+		log.WithError(errList).Warnf("compat catalog: live model list unavailable for provider %s", compatCatalogProviderName(target.name))
 		return
 	}
 	m.mu.Lock()
@@ -309,21 +319,6 @@ func (m *compatCatalogManager) generationOf() uint64 {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.generation
-}
-
-// liveModelsFor returns the last known good live model list of one configured
-// entry.
-//
-// The entry's full identity is matched, so a list discovered for one entry is
-// never applied to another entry that happens to share its name.
-func (m *compatCatalogManager) liveModelsFor(target compatCatalogTarget) []config.CompatCatalogModel {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	state, ok := m.state[target.key()]
-	if !ok || state == nil {
-		return nil
-	}
-	return state.models
 }
 
 // liveModelsForEntry returns the live model list of the entry with the given name,
@@ -393,7 +388,7 @@ func (m *compatCatalogManager) modelsFor(entryIndex int, compat *config.OpenAICo
 	}
 	target := compatCatalogTarget{
 		entryIndex: entryIndex,
-		name:       strings.TrimSpace(compat.Name),
+		name:       compatCatalogProviderName(compat.Name),
 		baseURL:    strings.TrimSpace(compat.BaseURL),
 		apiKey:     compatKeyOf(compat),
 		proxyURL:   strings.TrimSpace(proxyURL),
@@ -403,7 +398,7 @@ func (m *compatCatalogManager) modelsFor(entryIndex int, compat *config.OpenAICo
 		return compat
 	}
 	copied := *compat
-	copied.Models = config.ReconcileCompatCatalogModels(compat.Models, live, compat.ExcludedModels)
+	copied.Models = config.MergeCompatCatalogModels(compat.Models, live, compat.ExcludedModels)
 	return &copied
 }
 

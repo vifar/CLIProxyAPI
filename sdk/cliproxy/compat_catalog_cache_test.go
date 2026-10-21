@@ -102,3 +102,54 @@ func TestCompatCatalogEffectiveProxyPrefersThePerKeyProxy(t *testing.T) {
 		t.Fatalf("target proxy = %q, want the global proxy", targets[0].proxyURL)
 	}
 }
+
+// TestCompatCatalogDiscoversAnUnnamedProvider asserts that a provider entry
+// without a name is still discovered.
+//
+// A provider entry may be unnamed: the credential synthesis falls back to
+// "openai-compatibility" for it. Discovery used to skip an unnamed entry
+// silently, so its models were never published.
+func TestCompatCatalogDiscoversAnUnnamedProvider(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{
+			{
+				BaseURL: "https://openrouter.ai/api/v1",
+				APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+					{APIKey: "k"},
+				},
+			},
+		},
+	}
+	service := &Service{cfg: cfg}
+	manager := newCompatCatalogManager(service)
+	service.compatCatalog = manager
+
+	// The entry is a target: it is not skipped for having no name.
+	targets := compatCatalogTargets(cfg)
+	if len(targets) != 1 {
+		t.Fatalf("targets = %d, want 1", len(targets))
+	}
+	if targets[0].name != "openai-compatibility" {
+		t.Fatalf("target name = %q, want the fallback name", targets[0].name)
+	}
+
+	// And the entry is read.
+	var read bool
+	manager.fetcher = func(_ context.Context, _ string, _ string, _ string) ([]byte, int, error) {
+		read = true
+		return []byte(`{"data":[{"id":"unnamed-provider-model"}]}`), 200, nil
+	}
+	manager.refreshProvider(context.Background(), targets[0])
+	if !read {
+		t.Fatal("an unnamed provider was not read")
+	}
+
+	// And its models reach the registration projection.
+	compat := &cfg.OpenAICompatibility[0]
+	merged := manager.modelsFor(0, compat, "")
+	if len(merged.Models) != 1 || merged.Models[0].Name != "unnamed-provider-model" {
+		t.Fatalf("merged models = %+v, want the discovered model", merged.Models)
+	}
+}
