@@ -66,11 +66,8 @@ func TestCompatCatalogModelListReadsTheProviderList(t *testing.T) {
 	if models[0].ID != "deepseek-v4.1-flash" {
 		t.Fatalf("models[0].ID = %q", models[0].ID)
 	}
-	if models[0].DisplayName != "DeepSeek V4.1 Flash" {
-		t.Fatalf("models[0].DisplayName = %q", models[0].DisplayName)
-	}
-	if models[0].ContextLength != 131072 {
-		t.Fatalf("models[0].ContextLength = %d", models[0].ContextLength)
+	if models[1].ID != "glm-5.3" {
+		t.Fatalf("models[1].ID = %q", models[1].ID)
 	}
 	if requestedEndpoint != "https://ollama.com/v1/models" {
 		t.Fatalf("endpoint = %q", requestedEndpoint)
@@ -287,7 +284,7 @@ func TestCompatCatalogModelListNeverReturnsTheKeyInAModelName(t *testing.T) {
 		t.Fatalf("CompatCatalogModelList: %v", errList)
 	}
 	for _, model := range models {
-		if strings.Contains(model.ID, "super-secret") || strings.Contains(model.DisplayName, "super-secret") {
+		if strings.Contains(model.ID, "super-secret") {
 			t.Fatal("the model list carries the API key")
 		}
 	}

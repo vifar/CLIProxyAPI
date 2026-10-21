@@ -61,20 +61,17 @@ func CompatCatalogProviderFor(baseURL string) *CompatCatalogProvider {
 // CompatCatalogModel is one model read from a provider's live model list.
 type CompatCatalogModel struct {
 	// ID is the upstream model identifier.
+	//
+	// The live model list is used to publish the identifiers a provider serves.
+	// The other fields a provider may report are not decoded: nothing consumes
+	// them, and decoding them would imply a contract the discovery does not have.
 	ID string
-	// DisplayName is the provider's human-readable name, when it reports one.
-	DisplayName string
-	// ContextLength is the context window the provider reports, when it reports one.
-	ContextLength int
 }
 
 // compatCatalogModelsResponse is the OpenAI-compatible model list payload.
 type compatCatalogModelsResponse struct {
 	Data []struct {
-		ID            string `json:"id"`
-		Name          string `json:"name"`
-		ContextLength int    `json:"context_length"`
-		ContextWindow int    `json:"context_window"`
+		ID string `json:"id"`
 	} `json:"data"`
 }
 
@@ -188,15 +185,7 @@ func CompatCatalogModelList(
 			continue
 		}
 		seen[id] = struct{}{}
-		contextLength := entry.ContextLength
-		if contextLength <= 0 {
-			contextLength = entry.ContextWindow
-		}
-		models = append(models, CompatCatalogModel{
-			ID:            id,
-			DisplayName:   strings.TrimSpace(entry.Name),
-			ContextLength: contextLength,
-		})
+		models = append(models, CompatCatalogModel{ID: id})
 	}
 	if len(models) == 0 {
 		return nil, fmt.Errorf("live model list is empty")

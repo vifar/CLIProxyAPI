@@ -196,3 +196,48 @@ func TestModelRegistrationFenceDetectsAProviderExclusionChange(t *testing.T) {
 		t.Fatal("the fence must match an unchanged exclusion list")
 	}
 }
+
+// TestModelRegistrationFenceAppliesToAnAPIKeyCredential asserts that the
+// compatible provider's exclusion fence applies to an API-key credential.
+//
+// A compatible provider's credential is an API key, and the fence's exclusion
+// checks for the global OAuth exclusions are restricted to the credentials those
+// apply to. The provider's own excluded-models list applies to every credential,
+// so its check must not be nested under that restriction.
+func TestModelRegistrationFenceAppliesToAnAPIKeyCredential(t *testing.T) {
+	t.Parallel()
+
+	auth := &coreauth.Auth{
+		ID:       "compat-fence-apikey-auth",
+		Provider: "openai-compatibility",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"compat_name":  "ollama-cloud",
+			"config_index": "0",
+			"auth_kind":    coreauth.AuthKindAPIKey,
+		},
+	}
+	if auth.AuthKind() != coreauth.AuthKindAPIKey {
+		t.Fatalf("auth kind = %q, want an API key", auth.AuthKind())
+	}
+
+	cfg := &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{
+			{
+				Name:           "ollama-cloud",
+				BaseURL:        "https://ollama.com/v1",
+				ExcludedModels: []string{"excluded-model"},
+			},
+		},
+	}
+	fence := newModelRegistrationFence(auth, cfg)
+	if fence.compatExclusions == "" {
+		t.Fatal("the fence must carry the provider's own exclusion list")
+	}
+
+	// A reload that changes the list is detected for this credential too.
+	cfg.OpenAICompatibility[0].ExcludedModels = []string{"other-model"}
+	if fence.compatExclusions == compatExcludedModelsSummaryForConfig(cfg, auth) {
+		t.Fatal("the fence must not match a changed exclusion list for an API-key credential")
+	}
+}

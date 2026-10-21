@@ -197,20 +197,31 @@ func resolveCompatConfigEntry(cfg *config.Config, a *coreauth.Auth) *config.Open
 
 func (f modelRegistrationFence) publishIfCurrent(s *Service, authID string, publish func() bool) bool {
 	publishWithConfig := func() bool {
-		if s != nil && !f.disabled && f.authKind != coreauth.AuthKindAPIKey && strings.TrimSpace(f.attributes["excluded_models"]) == "" {
+		if s != nil && !f.disabled {
 			s.cfgMu.RLock()
 			defer s.cfgMu.RUnlock()
-			// Match the watcher's normalization so no-op and unrelated reloads do not
-			// discard work. A real change always schedules a replacement: the watcher
-			// redispatches affected auths, and applyConfigRuntime re-registers every
-			// auth (which also covers Home mode, where no watcher runs).
-			for _, provider := range [2]string{f.exclusionProvider, f.fallbackExclusionProvider} {
-				if provider == "" {
-					continue
-				}
-				current := oauthExcludedModelsForConfig(s.cfg, provider, f.authKind)
-				if f.globalExclusions[provider] != diff.SummarizeExcludedModels(current) {
-					return false
+			// The compatible provider carries its own excluded-models list, and it
+			// applies to an API-key credential, so this check is not restricted to
+			// the credentials the global OAuth exclusions apply to.
+			//
+			// A registration that captured one configuration must not publish
+			// under a later one, or an excluded model would be republished.
+			if f.compatAuth != nil && f.compatExclusions != compatExcludedModelsSummaryForConfig(s.cfg, f.compatAuth) {
+				return false
+			}
+			if f.authKind != coreauth.AuthKindAPIKey && strings.TrimSpace(f.attributes["excluded_models"]) == "" {
+				// Match the watcher's normalization so no-op and unrelated reloads do not
+				// discard work. A real change always schedules a replacement: the watcher
+				// redispatches affected auths, and applyConfigRuntime re-registers every
+				// auth (which also covers Home mode, where no watcher runs).
+				for _, provider := range [2]string{f.exclusionProvider, f.fallbackExclusionProvider} {
+					if provider == "" {
+						continue
+					}
+					current := oauthExcludedModelsForConfig(s.cfg, provider, f.authKind)
+					if f.globalExclusions[provider] != diff.SummarizeExcludedModels(current) {
+						return false
+					}
 				}
 			}
 			// The compatible provider's own excluded-models list applies to it
