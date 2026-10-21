@@ -67,7 +67,7 @@ type compatUsageCredential struct {
 // compatUsageResponse is the meter report for one credential.
 type compatUsageResponse struct {
 	Credential compatUsageCredential `json:"credential"`
-	// Status is one of "success", "unavailable", "unsupported", "disabled" or
+	// Status is one of "success", "unavailable", "disabled" or
 	// "error".
 	Status string `json:"status"`
 	// HTTPStatus is the upstream status code when the upstream answered with an
@@ -117,7 +117,9 @@ func compatUsageAdapterFor(baseURL string) *compatUsageAdapter {
 	if errParse != nil {
 		return nil
 	}
-	if parsed.Scheme != "https" || parsed.User != nil || parsed.Port() != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+	// Port() and RawQuery alone miss an explicit empty port (host:) and an
+	// empty query (path?). Reject those delimiters as well.
+	if parsed.Scheme != "https" || parsed.User != nil || strings.Contains(parsed.Host, ":") || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
 		return nil
 	}
 	host := strings.ToLower(parsed.Hostname())
@@ -292,12 +294,12 @@ func compatUsageParseWindows(adapterID string, payload map[string]any) []compatU
 	case "ollama":
 		// Ollama Cloud's balance response has two shapes. A modern plan reports
 		// the included balance and allowance for the period; a legacy plan reports
-		// the session and weekly limits with the percentage remaining.
+		// remaining percentages for the individual windows it supplies.
 		included, ok := payload["included"].(map[string]any)
 		if !ok {
 			return windows
 		}
-		for _, period := range []string{"session", "weekly"} {
+		for _, period := range []string{"session", "weekly", "monthly"} {
 			entry, okEntry := included[period].(map[string]any)
 			if !okEntry {
 				continue
@@ -532,7 +534,7 @@ func (r *compatUsageReader) Read(ctx context.Context, cfg *config.Config, creden
 		return empty, nil
 	}
 	if target.Adapter == nil {
-		empty.Status = "unsupported"
+		empty.Status = "unavailable"
 		return empty, nil
 	}
 

@@ -148,7 +148,7 @@ the configured provider name:
 
 | Host | Accepted paths | Meter request | Reported data, when available |
 | --- | --- | --- | --- |
-| `ollama.com` | Empty or `/v1` | `https://ollama.com/api/balance` | Account-wide `session` and `weekly` windows, or an `included` allowance window; `purchased_remaining` and `included_remaining` balances. |
+| `ollama.com` | Empty or `/v1` | `https://ollama.com/api/balance` | Account-wide `session`, `weekly`, and `monthly` windows when reported, or an `included` allowance window; `purchased_remaining` and `included_remaining` balances. |
 | `openrouter.ai` | Empty, `/api`, or `/api/v1` | `https://openrouter.ai/api/v1/key` | `key_budget` window when a positive key limit and remaining amount exist; `key_remaining` and `key_spent` balances. |
 
 Meter requests send the selected API key only to the fixed provider endpoint and
@@ -165,8 +165,7 @@ also includes `fetched_at` in UTC RFC3339; cached responses retain that timestam
 | `status` | Meaning |
 | --- | --- |
 | `success` | At least one window or balance was read. |
-| `unavailable` | The upstream JSON contains no recognized usable meter values. |
-| `unsupported` | No adapter matches the configured base URL; no upstream request is made. |
+| `unavailable` | No adapter matches the configured base URL (no upstream request is made), or the upstream JSON contains no recognized usable meter values. |
 | `disabled` | The provider entry is disabled; no upstream request is made. |
 | `error` | The upstream request failed, returned a non-2xx status, or returned invalid JSON. `http_status` is included for a non-2xx upstream response. |
 
