@@ -35,7 +35,11 @@ func TestCompatCatalogCacheIsDiscardedWhenTheLiveListsChange(t *testing.T) {
 		t.Fatal("a cache built at the current generation must be current")
 	}
 
-	// A discovery changes the live lists.
+	// A discovery changes the live lists. The reader is replaced, so the test
+	// does not reach the provider and does not need a credential.
+	manager.fetcher = func(_ context.Context, _ string, _ string, _ string) ([]byte, int, error) {
+		return []byte(`{"data":[{"id":"discovered-model"}]}`), 200, nil
+	}
 	target := compatCatalogTarget{
 		entryIndex: 0,
 		name:       "ollama-cloud",
