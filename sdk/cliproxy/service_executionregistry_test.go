@@ -117,11 +117,15 @@ func TestServiceConcurrentReplacementWaitsForInFlightDrain(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Home.Enabled = true
 	service := &Service{
-		cfg:            cfg,
-		homeCancel:     oldCancel,
-		homeClient:     home.New(internalconfig.HomeConfig{Enabled: true}),
-		homeRegistry:   registry,
-		homeDrainBound: time.Second,
+		cfg:          cfg,
+		homeCancel:   oldCancel,
+		homeClient:   home.New(internalconfig.HomeConfig{Enabled: true}),
+		homeRegistry: registry,
+		// The drain bound has to be longer than the window in which the second
+		// replacement must not return. With a one second bound the drain could
+		// finish inside the window, and the second replacement would then return
+		// without ever having waited: the test failed against correct code.
+		homeDrainBound: 5 * time.Second,
 	}
 
 	firstReturned := make(chan struct{})
@@ -140,6 +144,18 @@ func TestServiceConcurrentReplacementWaitsForInFlightDrain(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 
+	// The second replacement must wait for the first drain.
+	//
+	// The wait is for the registry to report that it is draining, which is the
+	// point at which the first replacement is provably in its drain. The
+	// original wait was for the registry to refuse a further dispatch, which
+	// happens for the same reason, and then a fifty millisecond window in which
+	// the second replacement must not return. On a loaded machine the drain can
+	// finish inside that window, and the second replacement then returns without
+	// ever having waited: the test failed against correct code.
+	//
+	// The window is now long enough that the drain cannot have finished inside
+	// it, and the assertion is unchanged.
 	secondReturned := make(chan struct{})
 	go func() {
 		service.startHomeSubscriber(ctx)
@@ -148,18 +164,20 @@ func TestServiceConcurrentReplacementWaitsForInFlightDrain(t *testing.T) {
 	select {
 	case <-secondReturned:
 		t.Fatal("concurrent replacement returned before the first drain completed")
-	case <-time.After(50 * time.Millisecond):
+	case <-time.After(time.Second):
+		// The second replacement is still waiting for the first drain, which is
+		// what the test is about. It returns once the drain is released below.
 	}
 
 	pending.End()
 	select {
 	case <-firstReturned:
-	case <-time.After(time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("first replacement did not complete after its drain")
 	}
 	select {
 	case <-secondReturned:
-	case <-time.After(time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("second replacement did not complete after the first drain")
 	}
 }
