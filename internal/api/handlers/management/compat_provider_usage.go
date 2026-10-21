@@ -360,6 +360,9 @@ type compatUsageReader struct {
 	mu      sync.Mutex
 	cache   map[string]compatUsageCacheEntry
 	pending map[string]*compatUsagePending
+	// onPending is called when a read parks on an in-flight read. It exists so a
+	// test can establish that ordering deterministically instead of sleeping.
+	onPending func(credentialID string)
 }
 
 // compatUsageCacheEntry is one cached meter result.
@@ -490,7 +493,11 @@ func (r *compatUsageReader) Read(ctx context.Context, cfg *config.Config, creden
 		return previous.result, nil
 	}
 	if wait, okPending := r.pending[target.ID]; okPending {
+		onPending := r.onPending
 		r.mu.Unlock()
+		if onPending != nil {
+			onPending(target.ID)
+		}
 		select {
 		case <-wait.done:
 			// The result is published before done is closed, so every waiter reads

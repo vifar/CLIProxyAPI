@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -430,9 +431,17 @@ func TestCompatUsageReaderConcurrentWaitersGetTheResult(t *testing.T) {
 
 	release := make(chan struct{})
 	started := make(chan struct{})
-	var once sync.Once
+	// The second read must be known to have entered the pending branch before the
+	// fetcher is released, so the test cannot pass by reading a populated cache
+	// instead of waiting on the in-flight read.
+	secondParked := make(chan struct{})
+	var parkOnce sync.Once
+	reader.onPending = func(string) { parkOnce.Do(func() { close(secondParked) }) }
+	var fetchCount atomic.Int32
 	reader.fetcher = func(_ context.Context, _ string, _ string, _ string) ([]byte, int, error) {
-		once.Do(func() { close(started) })
+		if fetchCount.Add(1) == 1 {
+			close(started)
+		}
 		<-release
 		return []byte(`{"data":{"limit":100,"limit_remaining":25,"usage":75}}`), http.StatusOK, nil
 	}
@@ -457,8 +466,14 @@ func TestCompatUsageReaderConcurrentWaitersGetTheResult(t *testing.T) {
 		results <- outcome{result, err}
 	}()
 
-	// Give the second read a moment to reach the pending branch.
-	time.Sleep(50 * time.Millisecond)
+	// The second read reaches the pending branch and waits there. The reader
+	// signals when it parks on the in-flight read, so the ordering is
+	// deterministic and no sleep is involved.
+	select {
+	case <-secondParked:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the second read did not park on the in-flight read")
+	}
 	close(release)
 
 	for i := 0; i < 2; i++ {
