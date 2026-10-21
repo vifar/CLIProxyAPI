@@ -190,18 +190,22 @@ func TestCompatCatalogRefreshIsolatesProviders(t *testing.T) {
 	service := &Service{cfg: cfg}
 	manager := newCompatCatalogManager(service)
 
+	// The stalled provider blocks until the test releases it. It is never
+	// signalled by itself, so it really does stall.
 	stalled := make(chan struct{})
+	released := make(chan struct{})
 	var stalledOnce sync.Once
 	manager.fetcher = func(_ context.Context, endpoint, _, _ string) ([]byte, int, error) {
 		if strings.Contains(endpoint, "ollama.com") {
 			stalledOnce.Do(func() { close(stalled) })
-			<-stalled
+			<-released
 			return nil, 0, context.Canceled
 		}
 		return []byte(`{"data":[{"id":"openrouter-model"}]}`), 200, nil
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	done := make(chan struct{})
 	go func() {
 		manager.Refresh(ctx)
@@ -230,13 +234,14 @@ func TestCompatCatalogRefreshIsolatesProviders(t *testing.T) {
 		}
 		manager.mu.Unlock()
 		if found {
-			cancel()
+			// The stalled provider is released so the pass can finish.
+			close(released)
 			<-done
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	cancel()
+	close(released)
 	<-done
 	t.Fatal("the answered provider's result was not recorded while the other one stalled")
 }

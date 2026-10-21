@@ -102,6 +102,9 @@ type compatCatalogManager struct {
 	mu sync.Mutex
 	// state holds the last known good list per configured entry.
 	state map[string]*compatCatalogState
+	// publishMu serializes the publications, so a publication that started before a
+	// newer one cannot register a stale list after it.
+	publishMu sync.Mutex
 }
 
 // newCompatCatalogManager creates a manager for a service.
@@ -158,14 +161,11 @@ func (m *compatCatalogManager) Refresh(ctx context.Context) {
 		return
 	}
 
-	var wait sync.WaitGroup
 	for _, target := range targets {
 		if ctx.Err() != nil {
 			return
 		}
-		wait.Add(1)
 		go func(current compatCatalogTarget) {
-			defer wait.Done()
 			// No deadline is imposed on the upstream request. A provider that
 			// establishes its connection promptly but takes a long time to return
 			// its catalog must not be cancelled while the response is read: the
@@ -175,15 +175,11 @@ func (m *compatCatalogManager) Refresh(ctx context.Context) {
 			m.refreshProvider(ctx, current)
 			// Each provider publishes as soon as it has answered, so a provider
 			// that never completes its response cannot hold back the results the
-			// others returned.
+			// others returned, and it cannot stop the next pass either.
 			if ctx.Err() == nil {
 				m.publishLiveModels(ctx)
 			}
 		}(target)
-	}
-	wait.Wait()
-	if ctx.Err() != nil {
-		return
 	}
 
 	// The publication runs on every refresh, not only when the upstream list
@@ -284,26 +280,26 @@ func (m *compatCatalogManager) liveModelsFor(target compatCatalogTarget) []confi
 	return state.models
 }
 
-// liveModelsForEntry returns the live model list of the entry at the given
-// position.
+// liveModelsForEntry returns the live model list of the entry with the given name,
+// base URL and key.
 //
-// A negative position means the position is unknown, and the entry is then
-// matched by its name and base URL. Two entries that share a name and a base URL
-// are the same provider as far as the model list is concerned.
-func (m *compatCatalogManager) liveModelsForEntry(entryIndex int, name, baseURL string) []config.CompatCatalogModel {
+// The key is part of the match, so a rotated key does not find the catalog the
+// previous key discovered.
+func (m *compatCatalogManager) liveModelsForEntry(name, baseURL, apiKey string) []config.CompatCatalogModel {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, state := range m.state {
 		if state == nil {
 			continue
 		}
-		if entryIndex >= 0 && state.target.entryIndex != entryIndex {
-			continue
-		}
 		if !strings.EqualFold(state.target.name, strings.TrimSpace(name)) {
 			continue
 		}
 		if !strings.EqualFold(state.target.baseURL, strings.TrimSpace(baseURL)) {
+			continue
+		}
+		if apiKey != "" && state.target.apiKey != apiKey {
+			// The key was rotated, so this catalog belongs to the old key.
 			continue
 		}
 		return state.models
@@ -324,6 +320,10 @@ func (m *compatCatalogManager) publishLiveModels(ctx context.Context) {
 	if m == nil || m.service == nil {
 		return
 	}
+	// The publications are serialized, so a publication that started before a
+	// newer one cannot register a stale list after it.
+	m.publishMu.Lock()
+	defer m.publishMu.Unlock()
 	m.service.registerConfigAPIKeyAuths(coreauth.WithSkipPersist(ctx), m.service.currentConfig())
 }
 
@@ -337,13 +337,27 @@ func (m *compatCatalogManager) modelsFor(compat *config.OpenAICompatibility) *co
 	if m == nil || compat == nil {
 		return compat
 	}
-	live := m.liveModelsForEntry(-1, compat.Name, compat.BaseURL)
+	live := m.liveModelsForEntry(compat.Name, compat.BaseURL, compatKeyOf(compat))
 	if len(live) == 0 {
 		return compat
 	}
 	copied := *compat
 	copied.Models = config.ReconcileCompatCatalogModels(compat.Models, live, compat.ExcludedModels)
 	return &copied
+}
+
+// compatKeyOf returns the first key of a provider entry, which is the key the live
+// model list was read with.
+func compatKeyOf(compat *config.OpenAICompatibility) string {
+	if compat == nil {
+		return ""
+	}
+	for _, entry := range compat.APIKeyEntries {
+		if key := strings.TrimSpace(entry.APIKey); key != "" {
+			return key
+		}
+	}
+	return ""
 }
 
 // compatCatalogModelsEqual reports whether two configured model lists are the same.
