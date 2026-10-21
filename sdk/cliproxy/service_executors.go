@@ -73,7 +73,7 @@ func newOpenAICompatibilityRegistrationCacheForConfig(cfg *config.Config, manage
 			// here, at the registration boundary, rather than in the configuration.
 			// The configuration is the operator's, and a discovered row written back
 			// would become a permanent pin.
-			models: buildOpenAICompatibilityConfigModels(manager.modelsFor(compat)),
+			models: buildOpenAICompatibilityConfigModels(manager.modelsFor(i, compat, cfg.ProxyURL)),
 		}
 		cache.byIndex[i] = entry
 		if _, exists := cache.byName[key]; !exists {

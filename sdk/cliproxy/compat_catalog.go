@@ -16,11 +16,6 @@ import (
 // cadence, so both lists stay in step.
 const CompatCatalogRefreshInterval = 3 * time.Hour
 
-// compatCatalogRefreshTimeout bounds one refresh pass, so a slow provider cannot
-// hold the refresh loop. It is a budget for the whole pass, not a deadline
-// imposed on the upstream request.
-const compatCatalogRefreshTimeout = 60 * time.Second
-
 // compatCatalogFetcher is the live model list reader. It is replaceable in tests.
 type compatCatalogFetcher = config.CompatCatalogFetcher
 
@@ -34,8 +29,6 @@ type compatCatalogState struct {
 	target compatCatalogTarget
 	// models is the last known good live model list.
 	models []config.CompatCatalogModel
-	// fetchedAt is when the list was last read.
-	fetchedAt time.Time
 }
 
 // compatCatalogTarget identifies one configured provider entry.
@@ -102,6 +95,9 @@ type compatCatalogManager struct {
 	mu sync.Mutex
 	// state holds the last known good list per configured entry.
 	state map[string]*compatCatalogState
+	// inFlight holds the entries whose live read is in progress, so a provider
+	// that never answers does not accumulate a request per interval.
+	inFlight map[string]struct{}
 	// publishMu serializes the publications, so a publication that started before a
 	// newer one cannot register a stale list after it.
 	publishMu sync.Mutex
@@ -144,8 +140,9 @@ func (m *compatCatalogManager) Start(ctx context.Context) {
 // its response cannot block the others, and a provider that has answered
 // publishes its result without waiting for the rest.
 //
-// The publication goes through the service's own configuration commit boundary, so
-// a file reload that commits meanwhile is never overwritten by a stale snapshot.
+// At most one read per provider is in flight. A provider whose response never
+// completes would otherwise accumulate another request every interval, and an
+// older response could land after a newer one and resurrect removed models.
 func (m *compatCatalogManager) Refresh(ctx context.Context) {
 	if m == nil || m.service == nil {
 		return
@@ -165,7 +162,13 @@ func (m *compatCatalogManager) Refresh(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
+		if !m.beginRead(target) {
+			// A read for this provider is already in flight. The provider keeps
+			// its last known good list until that read answers.
+			continue
+		}
 		go func(current compatCatalogTarget) {
+			defer m.endRead(current)
 			// No deadline is imposed on the upstream request. A provider that
 			// establishes its connection promptly but takes a long time to return
 			// its catalog must not be cancelled while the response is read: the
@@ -187,6 +190,29 @@ func (m *compatCatalogManager) Refresh(ctx context.Context) {
 	// static models, so the discovered models have to be reconciled back even
 	// when the provider still reports the same list.
 	m.publishLiveModels(ctx)
+}
+
+// beginRead marks a read for one provider as in flight. It reports whether the
+// caller may proceed.
+func (m *compatCatalogManager) beginRead(target compatCatalogTarget) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.inFlight == nil {
+		m.inFlight = make(map[string]struct{})
+	}
+	key := target.key()
+	if _, ok := m.inFlight[key]; ok {
+		return false
+	}
+	m.inFlight[key] = struct{}{}
+	return true
+}
+
+// endRead clears the in-flight mark for one provider.
+func (m *compatCatalogManager) endRead(target compatCatalogTarget) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.inFlight, target.key())
 }
 
 // compatCatalogTargets returns the configured entries whose live model list is
@@ -244,9 +270,8 @@ func (m *compatCatalogManager) refreshProvider(ctx context.Context, target compa
 	previous, existed := m.state[target.key()]
 	changed := !existed || !compatCatalogModelIDsEqual(previous.models, models)
 	m.state[target.key()] = &compatCatalogState{
-		target:    target,
-		models:    models,
-		fetchedAt: time.Now(),
+		target: target,
+		models: models,
 	}
 	return changed
 }
@@ -285,21 +310,43 @@ func (m *compatCatalogManager) liveModelsFor(target compatCatalogTarget) []confi
 //
 // The key is part of the match, so a rotated key does not find the catalog the
 // previous key discovered.
-func (m *compatCatalogManager) liveModelsForEntry(name, baseURL, apiKey string) []config.CompatCatalogModel {
+// liveModelsForEntry returns the live model list of the configured entry.
+//
+// The entry's full identity is matched: its position in the configuration, its
+// name, its base URL, its key and its proxy. Matching on the name alone would
+// let two entries that share a name receive each other's models, and a rotated
+// key or a changed proxy would leave the obsolete list in place.
+//
+// The position is the strongest identifier, so it is matched first. A caller
+// that does not know the position falls back to the name, the base URL, the key
+// and the proxy, and a negative position never matches a stored one.
+func (m *compatCatalogManager) liveModelsForEntry(target compatCatalogTarget) []config.CompatCatalogModel {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if target.entryIndex >= 0 {
+		state, ok := m.state[target.key()]
+		if !ok || state == nil {
+			return nil
+		}
+		return state.models
+	}
 	for _, state := range m.state {
 		if state == nil {
 			continue
 		}
-		if !strings.EqualFold(state.target.name, strings.TrimSpace(name)) {
+		if !strings.EqualFold(state.target.name, strings.TrimSpace(target.name)) {
 			continue
 		}
-		if !strings.EqualFold(state.target.baseURL, strings.TrimSpace(baseURL)) {
+		if !strings.EqualFold(state.target.baseURL, strings.TrimSpace(target.baseURL)) {
 			continue
 		}
-		if apiKey != "" && state.target.apiKey != apiKey {
+		if target.apiKey != "" && state.target.apiKey != target.apiKey {
 			// The key was rotated, so this catalog belongs to the old key.
+			continue
+		}
+		if target.proxyURL != "" && state.target.proxyURL != target.proxyURL {
+			// The proxy was changed, so this catalog was read through the old
+			// proxy.
 			continue
 		}
 		return state.models
@@ -314,8 +361,9 @@ func (m *compatCatalogManager) liveModelsForEntry(name, baseURL, apiKey string) 
 // reads them from, so nothing discovered can be written back to the configuration
 // file.
 //
-// All that is needed here is to re-register the affected credentials, so the merged
-// models reach the model registry.
+// Only the credentials that are currently registered are re-registered. A
+// credential that a configuration change removed is not recreated from a
+// configuration snapshot.
 func (m *compatCatalogManager) publishLiveModels(ctx context.Context) {
 	if m == nil || m.service == nil {
 		return
@@ -324,7 +372,7 @@ func (m *compatCatalogManager) publishLiveModels(ctx context.Context) {
 	// newer one cannot register a stale list after it.
 	m.publishMu.Lock()
 	defer m.publishMu.Unlock()
-	m.service.registerConfigAPIKeyAuths(coreauth.WithSkipPersist(ctx), m.service.currentConfig())
+	m.service.refreshCompatModelRegistration(coreauth.WithSkipPersist(ctx))
 }
 
 // modelsFor returns a copy of a provider entry whose model list also carries the
@@ -333,11 +381,28 @@ func (m *compatCatalogManager) publishLiveModels(ctx context.Context) {
 // The entry is a copy, so the configuration the operator wrote is never changed:
 // a discovered row belongs to the runtime, and writing it back would turn it into
 // a permanent pin the live list could never take back.
-func (m *compatCatalogManager) modelsFor(compat *config.OpenAICompatibility) *config.OpenAICompatibility {
+// modelsFor returns a copy of a provider entry whose model list also carries the
+// models its live model list contributed.
+//
+// The entry is a copy, so the configuration the operator wrote is never changed:
+// a discovered row belongs to the runtime, and writing it back would turn it into
+// a permanent pin the live list could never take back.
+//
+// The entry's position in the configuration identifies it. The position is
+// negative when the caller does not know it, and the lookup then falls back to
+// the name, the base URL, the key and the proxy.
+func (m *compatCatalogManager) modelsFor(entryIndex int, compat *config.OpenAICompatibility, proxyURL string) *config.OpenAICompatibility {
 	if m == nil || compat == nil {
 		return compat
 	}
-	live := m.liveModelsForEntry(compat.Name, compat.BaseURL, compatKeyOf(compat))
+	target := compatCatalogTarget{
+		entryIndex: entryIndex,
+		name:       strings.TrimSpace(compat.Name),
+		baseURL:    strings.TrimSpace(compat.BaseURL),
+		apiKey:     compatKeyOf(compat),
+		proxyURL:   strings.TrimSpace(proxyURL),
+	}
+	live := m.liveModelsForEntry(target)
 	if len(live) == 0 {
 		return compat
 	}
@@ -358,17 +423,4 @@ func compatKeyOf(compat *config.OpenAICompatibility) string {
 		}
 	}
 	return ""
-}
-
-// compatCatalogModelsEqual reports whether two configured model lists are the same.
-func compatCatalogModelsEqual(left, right []config.OpenAICompatibilityModel) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for index := range left {
-		if left[index].Name != right[index].Name || left[index].Alias != right[index].Alias {
-			return false
-		}
-	}
-	return true
 }

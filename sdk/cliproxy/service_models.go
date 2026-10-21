@@ -249,7 +249,7 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 					isCompatAuth = true
 				}
 			}
-			registerCompat := func(compat *config.OpenAICompatibility) bool {
+			registerCompat := func(entryIndex int, compat *config.OpenAICompatibility) bool {
 				if compat == nil || compat.Disabled {
 					return false
 				}
@@ -263,7 +263,7 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 				// here, at the registration boundary, rather than in the
 				// configuration. The configuration is the operator's, and a
 				// discovered row written back to it would become a permanent pin.
-				ms := buildOpenAICompatibilityConfigModels(s.compatModelsFor(compat))
+				ms := buildOpenAICompatibilityConfigModels(s.compatModelsFor(entryIndex, compat, cfg.ProxyURL))
 				if providerKey == "" {
 					providerKey = "openai-compatibility"
 				}
@@ -304,12 +304,12 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 					return published
 				}
 			}
-			if indexed := configEntryForAuthIndex(a, cfg.OpenAICompatibility); indexed != nil && registerCompat(indexed) {
+			if indexed, index := configEntryForAuthIndex(a, cfg.OpenAICompatibility); indexed != nil && registerCompat(index, indexed) {
 				return published
 			}
 			for i := range cfg.OpenAICompatibility {
 				compat := &cfg.OpenAICompatibility[i]
-				if strings.EqualFold(compat.Name, compatName) && registerCompat(compat) {
+				if strings.EqualFold(compat.Name, compatName) && registerCompat(i, compat) {
 					return published
 				}
 			}
@@ -429,15 +429,20 @@ func (s *Service) latestAuthForModelRegistration(authID string) (*coreauth.Auth,
 	return auth, true
 }
 
-func configEntryForAuthIndex[T any](auth *coreauth.Auth, entries []T) *T {
+// configEntryForAuthIndex returns the configuration entry an auth was
+// synthesized from, together with its position in the configuration.
+//
+// The position identifies the entry: two entries can share a name, and the
+// position is what tells them apart.
+func configEntryForAuthIndex[T any](auth *coreauth.Auth, entries []T) (*T, int) {
 	if auth == nil || auth.AuthSourceKind() != coreauth.AuthSourceConfig || auth.Attributes == nil {
-		return nil
+		return nil, -1
 	}
 	index, errIndex := strconv.Atoi(strings.TrimSpace(auth.Attributes[coreauth.AttributeConfigIndex]))
 	if errIndex != nil || index < 0 || index >= len(entries) {
-		return nil
+		return nil, -1
 	}
-	return &entries[index]
+	return &entries[index], index
 }
 
 func (s *Service) resolveConfigClaudeKey(auth *coreauth.Auth) *config.ClaudeKey {
@@ -448,7 +453,7 @@ func resolveConfigClaudeKeyForConfig(cfg *config.Config, auth *coreauth.Auth) *c
 	if auth == nil || cfg == nil {
 		return nil
 	}
-	if entry := configEntryForAuthIndex(auth, cfg.ClaudeKey); entry != nil {
+	if entry, _ := configEntryForAuthIndex(auth, cfg.ClaudeKey); entry != nil {
 		return entry
 	}
 	var attrKey, attrBase string
@@ -516,7 +521,7 @@ func resolveConfigGeminiKeyEntryForConfig(cfg *config.Config, auth *coreauth.Aut
 	if auth == nil || cfg == nil {
 		return nil
 	}
-	if entry := configEntryForAuthIndex(auth, entries); entry != nil {
+	if entry, _ := configEntryForAuthIndex(auth, entries); entry != nil {
 		return entry
 	}
 	var attrKey, attrBase string
@@ -549,7 +554,7 @@ func resolveConfigVertexCompatKeyForConfig(cfg *config.Config, auth *coreauth.Au
 	if auth == nil || cfg == nil {
 		return nil
 	}
-	if entry := configEntryForAuthIndex(auth, cfg.VertexCompatAPIKey); entry != nil {
+	if entry, _ := configEntryForAuthIndex(auth, cfg.VertexCompatAPIKey); entry != nil {
 		return entry
 	}
 	var attrKey, attrBase string
@@ -635,7 +640,7 @@ func resolveConfigCodexStyleKey(auth *coreauth.Auth, entries []config.CodexKey, 
 		}
 		return attrBase != "" && strings.EqualFold(cfgBase, attrBase)
 	}
-	if entry := configEntryForAuthIndex(auth, entries); entry != nil && (!validateIndexCredentials || matchesCredentials(entry)) {
+	if entry, _ := configEntryForAuthIndex(auth, entries); entry != nil && (!validateIndexCredentials || matchesCredentials(entry)) {
 		return entry
 	}
 	for i := range entries {
@@ -878,18 +883,74 @@ func (s *Service) compatCatalogManager() *compatCatalogManager {
 	return s.compatCatalog
 }
 
+// refreshCompatModelRegistration re-registers the OpenAI-compatible credentials
+// that are currently registered, so the models a provider's live model list
+// contributed reach the model registry.
+//
+// Only the credentials that are already registered are re-registered. A
+// credential that a configuration change removed is not recreated from a
+// configuration snapshot, and a credential that is registered but is not
+// OpenAI-compatible is left alone.
+func (s *Service) refreshCompatModelRegistration(ctx context.Context) {
+	if s == nil || s.coreManager == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	registered := s.coreManager.List()
+	if len(registered) == 0 {
+		return
+	}
+	compatAuths := make([]*coreauth.Auth, 0, len(registered))
+	for _, auth := range registered {
+		if auth == nil || auth.Disabled {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(auth.Provider), "openai-compatibility") && !isOpenAICompatAuth(auth) {
+			continue
+		}
+		compatAuths = append(compatAuths, auth)
+	}
+	if len(compatAuths) == 0 {
+		return
+	}
+	// The registration resolves the live models for each credential at the moment
+	// it runs, so a registration batch that started before a discovery cannot
+	// apply a stale model list.
+	for _, auth := range compatAuths {
+		s.completeModelRegistrationForAuthWithCache(ctx, auth, nil)
+	}
+}
+
+// isOpenAICompatAuth reports whether an auth was synthesized from an
+// OpenAI-compatible provider entry.
+func isOpenAICompatAuth(auth *coreauth.Auth) bool {
+	if auth == nil {
+		return false
+	}
+	if auth.Attributes == nil {
+		return false
+	}
+	if _, ok := auth.Attributes["compat_name"]; ok {
+		return true
+	}
+	_, ok := auth.Attributes["provider_key"]
+	return ok
+}
+
 // compatModelsFor returns a provider entry whose model list also carries the
 // models its live model list contributed.
 //
 // The entry is a copy, so the configuration the operator wrote is never changed:
 // a discovered row belongs to the runtime, and writing it back would turn it into
 // a permanent pin the live list could never take back.
-func (s *Service) compatModelsFor(compat *config.OpenAICompatibility) *config.OpenAICompatibility {
+func (s *Service) compatModelsFor(entryIndex int, compat *config.OpenAICompatibility, proxyURL string) *config.OpenAICompatibility {
 	manager := s.compatCatalogManager()
 	if manager == nil {
 		return compat
 	}
-	return manager.modelsFor(compat)
+	return manager.modelsFor(entryIndex, compat, proxyURL)
 }
 
 func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []*ModelInfo {

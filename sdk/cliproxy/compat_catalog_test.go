@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
 // TestCompatCatalogTargetsOnlySupportedProviders asserts that only the providers
@@ -51,9 +53,14 @@ func TestCompatCatalogLiveModelsAreMatchedByTheFullTargetIdentity(t *testing.T) 
 	service := &Service{cfg: &config.Config{}}
 	manager := newCompatCatalogManager(service)
 
+	// Two entries share a name and a base URL, and a third has a different base
+	// URL. Only the first entry's list may reach it.
 	first := compatCatalogTarget{entryIndex: 0, name: "shared", baseURL: "https://openrouter.ai/api/v1", apiKey: "k"}
 	second := compatCatalogTarget{entryIndex: 1, name: "shared", baseURL: "https://openrouter.ai/api/v1", apiKey: "k"}
 	third := compatCatalogTarget{entryIndex: 0, name: "shared", baseURL: "https://api.example.com/v1", apiKey: "k"}
+	// The same entry with a rotated key and a changed proxy.
+	rotated := compatCatalogTarget{entryIndex: 0, name: "shared", baseURL: "https://openrouter.ai/api/v1", apiKey: "k2"}
+	proxied := compatCatalogTarget{entryIndex: 0, name: "shared", baseURL: "https://openrouter.ai/api/v1", apiKey: "k", proxyURL: "http://proxy.example.com:8080"}
 
 	manager.mu.Lock()
 	manager.state[first.key()] = &compatCatalogState{
@@ -62,16 +69,58 @@ func TestCompatCatalogLiveModelsAreMatchedByTheFullTargetIdentity(t *testing.T) 
 	}
 	manager.mu.Unlock()
 
-	if live := manager.liveModelsFor(first); len(live) != 1 {
-		t.Fatalf("live models = %+v, want one", live)
+	// The projection the registration path uses is exercised, not the test-only
+	// lookup helper.
+	entry := func() *config.OpenAICompatibility {
+		return &config.OpenAICompatibility{
+			Name:    "shared",
+			BaseURL: "https://openrouter.ai/api/v1",
+			APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+				{APIKey: "k"},
+			},
+		}
+	}
+
+	merged := manager.modelsFor(0, entry(), "")
+	if len(merged.Models) != 1 || merged.Models[0].Name != "model-a" {
+		t.Fatalf("merged models = %+v, want the discovered model", merged.Models)
 	}
 	// A different entry with the same name must not see the list.
+	merged = manager.modelsFor(1, entry(), "")
+	if len(merged.Models) != 0 {
+		t.Fatalf("merged models = %+v, want none for a different entry", merged.Models)
+	}
+	// A different base URL must not see the list either.
+	other := entry()
+	other.BaseURL = "https://api.example.com/v1"
+	merged = manager.modelsFor(0, other, "")
+	if len(merged.Models) != 0 {
+		t.Fatalf("merged models = %+v, want none for a different base URL", merged.Models)
+	}
+	// A rotated key must not see the list: it belongs to the previous key.
+	rotatedEntry := entry()
+	rotatedEntry.APIKeyEntries = []config.OpenAICompatibilityAPIKey{{APIKey: "k2"}}
+	merged = manager.modelsFor(0, rotatedEntry, "")
+	if len(merged.Models) != 0 {
+		t.Fatalf("merged models = %+v, want none for a rotated key", merged.Models)
+	}
+	// A changed proxy must not see the list: it was read through the old proxy.
+	merged = manager.modelsFor(0, entry(), "http://proxy.example.com:8080")
+	if len(merged.Models) != 0 {
+		t.Fatalf("merged models = %+v, want none for a changed proxy", merged.Models)
+	}
+	// The obsolete identities are not reachable.
 	if live := manager.liveModelsFor(second); len(live) != 0 {
 		t.Fatalf("live models = %+v, want none for a different entry", live)
 	}
-	// A different base URL must not see the list either.
 	if live := manager.liveModelsFor(third); len(live) != 0 {
 		t.Fatalf("live models = %+v, want none for a different base URL", live)
+	}
+	if live := manager.liveModelsFor(rotated); len(live) != 0 {
+		t.Fatalf("live models = %+v, want none for a rotated key", live)
+	}
+	if live := manager.liveModelsFor(proxied); len(live) != 0 {
+		t.Fatalf("live models = %+v, want none for a changed proxy", live)
 	}
 }
 
@@ -142,6 +191,9 @@ func TestCompatCatalogModelsForKeepsTheConfigurationUntouched(t *testing.T) {
 		Name:    "ollama-cloud",
 		BaseURL: "https://ollama.com/v1",
 		Models:  operator,
+		APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+			{APIKey: "k"},
+		},
 	}
 
 	target := compatCatalogTarget{
@@ -157,7 +209,7 @@ func TestCompatCatalogModelsForKeepsTheConfigurationUntouched(t *testing.T) {
 	}
 	manager.mu.Unlock()
 
-	merged := manager.modelsFor(compat)
+	merged := manager.modelsFor(0, compat, "")
 	if len(merged.Models) != 2 {
 		t.Fatalf("merged models = %+v, want the operator's row and the discovered one", merged.Models)
 	}
@@ -267,8 +319,27 @@ func TestCompatCatalogPublishDoesNotChangeTheConfiguration(t *testing.T) {
 			},
 		},
 	}
-	service := &Service{cfg: cfg}
+	// The service is wired, so the publication really runs.
+	coreManager := coreauth.NewManager(nil, nil, nil)
+	service := &Service{cfg: cfg, coreManager: coreManager}
 	manager := newCompatCatalogManager(service)
+	service.compatCatalog = manager
+
+	auth := &coreauth.Auth{
+		ID:       "compat-ollama-1",
+		Provider: "openai-compatibility",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"compat_name":  "ollama-cloud",
+			"provider_key": "openai-compatibility",
+			"config_index": "0",
+			"base_url":     "https://ollama.com/v1",
+		},
+	}
+	if _, errRegister := coreManager.Register(coreauth.WithSkipPersist(context.Background()), auth); errRegister != nil {
+		t.Fatalf("Register: %v", errRegister)
+	}
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
 
 	target := compatCatalogTarget{
 		entryIndex: 0,
@@ -285,6 +356,10 @@ func TestCompatCatalogPublishDoesNotChangeTheConfiguration(t *testing.T) {
 
 	manager.publishLiveModels(context.Background())
 
+	// The discovered model reached the registry.
+	if !registry.GetGlobalRegistry().ClientSupportsModel(auth.ID, "discovered-model") {
+		t.Fatal("the discovered model was not published to the registry")
+	}
 	// The configuration still holds only the operator's row.
 	if len(cfg.OpenAICompatibility[0].Models) != 1 {
 		t.Fatalf("the configuration was changed: %+v", cfg.OpenAICompatibility[0].Models)
