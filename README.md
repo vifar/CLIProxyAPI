@@ -186,9 +186,8 @@ oauth-excluded-models:
     - gpt-4o-mini
 ```
 
-`routing.strategy: round-robin` balances unbound selections between eligible
-providers at the highest available priority, then between that provider's
-credentials. Adding more keys to one provider does not increase its share.
+`routing.strategy: round-robin` uses the provider-equal selection policy in the
+[routing guide](docs/routing/provider-equal-mixed-round-robin.md).
 `routing.session-affinity: true` keeps an identified session bound to its
 provider and credential while that credential remains eligible. Unavailability
 uses the existing retry and rebinding policy.
@@ -197,14 +196,14 @@ using the binding refreshes its TTL. The duration accepts Go duration strings.
 These are the **shipped file's defaults**: omitting the affinity setting from
 another configuration leaves it off.
 
-Current main scopes mixed bindings by route, session and model. Provider-set
-scoping is supplied by [pending PR #4](https://github.com/vifar/CLIProxyAPI/pull/4);
-when it lands, these same settings apply within each provider-set scope. See the
-[routing guide](docs/routing/provider-equal-mixed-round-robin.md) for the current
-selection and failover rules.
+Provider-set scoping is supplied by
+[pending PR #4](https://github.com/vifar/CLIProxyAPI/pull/4); when it lands, these
+same settings apply within each provider-set scope. The routing guide owns the
+current binding scopes and failover rules.
 
-Use `oauth-excluded-models` directly: each list names models that an OAuth or
-file-backed provider must **not** serve, and `"*"` excludes all its models.
+Use `oauth-excluded-models` directly for OAuth/file-backed model exclusions;
+`"*"` excludes all models covered by a list. For per-credential overrides, see
+the OAuth exclusion rules in [config.example.yaml](config.example.yaml).
 There is no app-side inclusion-list inversion in this fork. Unknown YAML keys
 can be ignored by the loader, so spelling an inclusion key does not enable it.
 These exclusions do not filter the compatible API-key providers; their pinned

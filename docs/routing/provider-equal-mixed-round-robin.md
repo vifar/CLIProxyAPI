@@ -56,15 +56,9 @@ A recovered provider can participate in new selections without preempting an exi
 
 ## Configuration
 
-Provider-equal mixed selection is part of `round-robin`; no `provider-first` switch or new strategy is required. Session affinity remains opt-in. To enable sticky routing:
+Provider-equal mixed selection is part of `round-robin`; no `provider-first` switch or new strategy is required. For the fork's shipped configuration and session-sticky defaults, see [Fork configuration](../../README.md#fork-configuration). Other configurations must explicitly enable session affinity; omitting the setting leaves it off.
 
-```yaml
-routing:
-  strategy: round-robin
-  session-affinity: true
-```
-
-The `routing` block in [config.example.yaml](../../config.example.yaml) owns the defaults and remaining session-affinity settings. Plain model names remain the client contract; provider prefixes and duplicated aliases are not required to obtain equal provider selection. Unique provider aliases continue to route through one provider.
+The `routing` block in [config.example.yaml](../../config.example.yaml) owns the loader defaults and remaining session-affinity settings. Plain model names remain the client contract; provider prefixes and duplicated aliases are not required to obtain equal provider selection. Unique provider aliases continue to route through one provider.
 
 ## Implementation and Verification
 
