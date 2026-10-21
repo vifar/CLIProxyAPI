@@ -94,8 +94,12 @@ type compatUsageAdapter struct {
 // compatUsageAdapters lists the supported balance APIs. The endpoint is chosen
 // from the *host* of the configured base URL, so a key can never be sent to a
 // different origin than the one it was configured for.
+//
+// Ollama Cloud's balance endpoint is /api/balance: /api/usage reports usage
+// totals and buckets, not the remaining allowance. See
+// https://docs.ollama.com/api/balance.
 var compatUsageAdapters = []compatUsageAdapter{
-	{ID: "ollama", Endpoint: "https://ollama.com/api/usage", Scope: "account"},
+	{ID: "ollama", Endpoint: "https://ollama.com/api/balance", Scope: "account"},
 	{ID: "openrouter", Endpoint: "https://openrouter.ai/api/v1/key", Scope: "key"},
 }
 
@@ -217,7 +221,7 @@ func compatUsageResolveCredentials(cfg *config.Config) []compatUsageCredentialKe
 				proxyURL = providerProxy
 			}
 			out = append(out, compatUsageCredentialKey{
-				ID:           compatUsageOpaqueID(providerName, baseURL, keyIndex, key),
+				ID:           compatUsageOpaqueID(providerName, baseURL, index, keyIndex, key),
 				ProviderName: providerName,
 				BaseURL:      baseURL,
 				KeyNumber:    keyIndex + 1,
@@ -234,13 +238,19 @@ func compatUsageResolveCredentials(cfg *config.Config) []compatUsageCredentialKe
 // compatUsageOpaqueID derives a stable, opaque identifier for a credential. The key
 // is mixed into an HMAC, so the identifier cannot be reversed to the key and does
 // not change when the key rotates in place.
-func compatUsageOpaqueID(providerName, baseURL string, index int, key string) string {
+//
+// The provider entry's position in the configuration is part of the identity, so
+// two entries that share a name, a base URL and a key still get distinct
+// identifiers. Without it, a lookup could resolve to the wrong entry.
+func compatUsageOpaqueID(providerName, baseURL string, entryIndex, keyIndex int, key string) string {
 	mac := hmac.New(sha256.New, compatUsageIdentitySecret)
 	_, _ = mac.Write([]byte(providerName))
 	_, _ = mac.Write([]byte{0})
 	_, _ = mac.Write([]byte(baseURL))
 	_, _ = mac.Write([]byte{0})
-	_, _ = mac.Write([]byte(strconv.Itoa(index)))
+	_, _ = mac.Write([]byte(strconv.Itoa(entryIndex)))
+	_, _ = mac.Write([]byte{0})
+	_, _ = mac.Write([]byte(strconv.Itoa(keyIndex)))
 	_, _ = mac.Write([]byte{0})
 	_, _ = mac.Write([]byte(key))
 	return hex.EncodeToString(mac.Sum(nil))
@@ -280,35 +290,58 @@ func compatUsageParseWindows(adapterID string, payload map[string]any) []compatU
 	windows := make([]compatUsageMeter, 0)
 	switch adapterID {
 	case "ollama":
-		limits, ok := payload["limits"].(map[string]any)
+		// Ollama Cloud's balance response has two shapes. A modern plan reports
+		// the included balance and allowance for the period; a legacy plan reports
+		// the session and weekly limits with the percentage remaining.
+		included, ok := payload["included"].(map[string]any)
 		if !ok {
 			return windows
 		}
-		for _, period := range []string{"session", "weekly", "monthly"} {
-			entry, okEntry := limits[period].(map[string]any)
+		for _, period := range []string{"session", "weekly"} {
+			entry, okEntry := included[period].(map[string]any)
 			if !okEntry {
 				continue
 			}
-			usage, okUsage := compatUsageNumber(entry["usage"])
-			if !okUsage {
-				continue
-			}
-			usedPercent := usage * 100
-			if math.IsNaN(usedPercent) || math.IsInf(usedPercent, 0) {
+			remaining, okRemaining := compatUsageNumber(entry["remaining_percent"])
+			if !okRemaining {
 				continue
 			}
 			resetAt := ""
-			if raw, okRaw := entry["reset_at"].(string); okRaw {
+			if raw, okRaw := entry["resets_at"].(string); okRaw {
 				if parsed, errParse := time.Parse(time.RFC3339, strings.TrimSpace(raw)); errParse == nil {
 					resetAt = parsed.UTC().Format(time.RFC3339)
 				}
 			}
+			remainingPercent := math.Min(100, math.Max(0, remaining))
 			windows = append(windows, compatUsageMeter{
 				ID:               period,
-				UsedPercent:      usedPercent,
-				RemainingPercent: math.Max(0, 100-usedPercent),
+				UsedPercent:      100 - remainingPercent,
+				RemainingPercent: remainingPercent,
 				ResetAt:          resetAt,
 			})
+		}
+		if len(windows) == 0 {
+			// A modern plan reports the included balance against the allowance for
+			// the period, which is a remaining percentage too.
+			balance, hasBalance := compatUsageNumber(included["balance_usd"])
+			allowance, hasAllowance := compatUsageNumber(included["allowance_usd"])
+			if hasBalance && hasAllowance && allowance > 0 {
+				remainingPercent := math.Min(100, math.Max(0, (balance/allowance)*100))
+				resetAt := ""
+				if period, okPeriod := included["period"].(map[string]any); okPeriod {
+					if raw, okRaw := period["until"].(string); okRaw {
+						if parsed, errParse := time.Parse(time.RFC3339, strings.TrimSpace(raw)); errParse == nil {
+							resetAt = parsed.UTC().Format(time.RFC3339)
+						}
+					}
+				}
+				windows = append(windows, compatUsageMeter{
+					ID:               "included",
+					UsedPercent:      100 - remainingPercent,
+					RemainingPercent: remainingPercent,
+					ResetAt:          resetAt,
+				})
+			}
 		}
 	case "openrouter":
 		data, ok := payload["data"].(map[string]any)
@@ -332,18 +365,32 @@ func compatUsageParseWindows(adapterID string, payload map[string]any) []compatU
 // compatUsageParseBalances extracts the monetary balances a provider reports.
 func compatUsageParseBalances(adapterID string, payload map[string]any) []compatUsageBalance {
 	balances := make([]compatUsageBalance, 0)
-	if adapterID != "openrouter" {
-		return balances
-	}
-	data, ok := payload["data"].(map[string]any)
-	if !ok {
-		return balances
-	}
-	if remaining, okRemaining := compatUsageNumber(data["limit_remaining"]); okRemaining {
-		balances = append(balances, compatUsageBalance{ID: "key_remaining", Amount: remaining, Currency: "USD"})
-	}
-	if spent, okSpent := compatUsageNumber(data["usage"]); okSpent {
-		balances = append(balances, compatUsageBalance{ID: "key_spent", Amount: spent, Currency: "USD"})
+	switch adapterID {
+	case "ollama":
+		// The purchased balance is the unexpired purchased credits. The included
+		// balance is reported as a window, because it is a share of the period's
+		// allowance rather than a spend.
+		if purchased, ok := payload["purchased"].(map[string]any); ok {
+			if amount, okAmount := compatUsageNumber(purchased["balance_usd"]); okAmount {
+				balances = append(balances, compatUsageBalance{ID: "purchased_remaining", Amount: amount, Currency: "USD"})
+			}
+		}
+		if included, ok := payload["included"].(map[string]any); ok {
+			if amount, okAmount := compatUsageNumber(included["balance_usd"]); okAmount {
+				balances = append(balances, compatUsageBalance{ID: "included_remaining", Amount: amount, Currency: "USD"})
+			}
+		}
+	case "openrouter":
+		data, ok := payload["data"].(map[string]any)
+		if !ok {
+			return balances
+		}
+		if remaining, okRemaining := compatUsageNumber(data["limit_remaining"]); okRemaining {
+			balances = append(balances, compatUsageBalance{ID: "key_remaining", Amount: remaining, Currency: "USD"})
+		}
+		if spent, okSpent := compatUsageNumber(data["usage"]); okSpent {
+			balances = append(balances, compatUsageBalance{ID: "key_spent", Amount: spent, Currency: "USD"})
+		}
 	}
 	return balances
 }
@@ -416,6 +463,10 @@ func compatUsageDefaultFetcher(ctx context.Context, endpoint, key, proxyURL stri
 	}
 	if transport != nil {
 		client.Transport = transport
+		// The transport belongs to this request. Its idle connections are closed
+		// when the request is done, so repeated refreshes do not accumulate idle
+		// connections and transport goroutines until the idle timeout.
+		defer transport.CloseIdleConnections()
 	}
 	response, errDo := client.Do(request)
 	if errDo != nil {
@@ -513,7 +564,16 @@ func (r *compatUsageReader) Read(ctx context.Context, cfg *config.Config, creden
 
 	result := r.fetch(ctx, *target, empty)
 	r.mu.Lock()
-	r.cache[target.ID] = compatUsageCacheEntry{at: r.now(), result: result}
+	// Only a successful read is cached. Caching a failure would make the next
+	// healthy caller receive the error without ever contacting the provider: for
+	// example when the initiating request is cancelled, its upstream fetch is
+	// cancelled too, and the resulting error would be served for the whole cache
+	// lifetime.
+	if result.Status == "success" {
+		r.cache[target.ID] = compatUsageCacheEntry{at: r.now(), result: result}
+	} else {
+		delete(r.cache, target.ID)
+	}
 	pending.result = result
 	delete(r.pending, target.ID)
 	r.mu.Unlock()
@@ -527,12 +587,10 @@ func (r *compatUsageReader) Read(ctx context.Context, cfg *config.Config, creden
 func (r *compatUsageReader) fetch(ctx context.Context, credential compatUsageCredentialKey, empty compatUsageResponse) compatUsageResponse {
 	body, status, errFetch := r.fetcher(ctx, credential.Adapter.Endpoint, credential.Key, credential.ProxyURL)
 	if errFetch != nil {
-		r.dropCache(credential.ID)
 		empty.Status = "error"
 		return empty
 	}
 	if status < 200 || status >= 300 {
-		r.dropCache(credential.ID)
 		empty.Status = "error"
 		empty.HTTPStatus = status
 		return empty
@@ -540,7 +598,6 @@ func (r *compatUsageReader) fetch(ctx context.Context, credential compatUsageCre
 
 	payload := map[string]any{}
 	if errDecode := json.Unmarshal(body, &payload); errDecode != nil {
-		r.dropCache(credential.ID)
 		empty.Status = "error"
 		return empty
 	}
@@ -556,13 +613,6 @@ func (r *compatUsageReader) fetch(ctx context.Context, credential compatUsageCre
 	}
 	empty.Status = "success"
 	return empty
-}
-
-// dropCache removes one cached meter result.
-func (r *compatUsageReader) dropCache(credentialID string) {
-	r.mu.Lock()
-	delete(r.cache, credentialID)
-	r.mu.Unlock()
 }
 
 // GetCompatProviderUsage lists the OpenAI-compatible credentials that have a usage

@@ -46,7 +46,7 @@ func TestCompatUsageAdapterForRecognizesSupportedProviders(t *testing.T) {
 	if ollama == nil {
 		t.Fatal("expected an adapter for https://ollama.com/v1")
 	}
-	if ollama.Endpoint != "https://ollama.com/api/usage" {
+	if ollama.Endpoint != "https://ollama.com/api/balance" {
 		t.Fatalf("ollama endpoint = %q", ollama.Endpoint)
 	}
 	if ollama.Scope != "account" {
@@ -102,7 +102,7 @@ func TestCompatUsageAdapterForRejectsUnsafeOrUnknownOrigins(t *testing.T) {
 func TestCompatUsageOpaqueIDDoesNotLeakTheKey(t *testing.T) {
 	t.Parallel()
 
-	id := compatUsageOpaqueID("ollama-cloud", "https://ollama.com/v1", 0, "super-secret-key-value")
+	id := compatUsageOpaqueID("ollama-cloud", "https://ollama.com/v1", 0, 0, "super-secret-key-value")
 	if strings.Contains(id, "super-secret-key-value") {
 		t.Fatal("opaque id contains the API key")
 	}
@@ -110,11 +110,11 @@ func TestCompatUsageOpaqueIDDoesNotLeakTheKey(t *testing.T) {
 		t.Fatalf("opaque id length = %d, want 64", len(id))
 	}
 	// The identifier is stable for the same credential.
-	if again := compatUsageOpaqueID("ollama-cloud", "https://ollama.com/v1", 0, "super-secret-key-value"); again != id {
+	if again := compatUsageOpaqueID("ollama-cloud", "https://ollama.com/v1", 0, 0, "super-secret-key-value"); again != id {
 		t.Fatal("opaque id is not stable")
 	}
 	// A different key produces a different identifier.
-	if other := compatUsageOpaqueID("ollama-cloud", "https://ollama.com/v1", 0, "another-key"); other == id {
+	if other := compatUsageOpaqueID("ollama-cloud", "https://ollama.com/v1", 0, 0, "another-key"); other == id {
 		t.Fatal("opaque id did not change with the key")
 	}
 }
@@ -122,17 +122,19 @@ func TestCompatUsageOpaqueIDDoesNotLeakTheKey(t *testing.T) {
 func TestCompatUsageParseWindowsReadsOllamaUsage(t *testing.T) {
 	t.Parallel()
 
+	// A legacy plan reports the session and weekly limits with the percentage
+	// remaining.
 	payload := map[string]any{
-		"limits": map[string]any{
-			"session": map[string]any{"usage": 0.25, "reset_at": "2026-10-21T00:00:00Z"},
-			"weekly":  map[string]any{"usage": 0.5},
-			"monthly": map[string]any{"usage": 1.5},
+		"included": map[string]any{
+			"session": map[string]any{"remaining_percent": 75.0, "resets_at": "2026-10-21T00:00:00Z"},
+			"weekly":  map[string]any{"remaining_percent": 40.0},
 		},
+		"purchased": map[string]any{"balance_usd": 25.0},
 	}
 
 	windows := compatUsageParseWindows("ollama", payload)
-	if len(windows) != 3 {
-		t.Fatalf("windows len = %d, want 3", len(windows))
+	if len(windows) != 2 {
+		t.Fatalf("windows len = %d, want 2", len(windows))
 	}
 	if windows[0].ID != "session" || windows[0].UsedPercent != 25 || windows[0].RemainingPercent != 75 {
 		t.Fatalf("session window = %+v", windows[0])
@@ -140,12 +142,54 @@ func TestCompatUsageParseWindowsReadsOllamaUsage(t *testing.T) {
 	if windows[0].ResetAt != "2026-10-21T00:00:00Z" {
 		t.Fatalf("session reset_at = %q", windows[0].ResetAt)
 	}
-	if windows[1].ID != "weekly" || windows[1].RemainingPercent != 50 {
+	if windows[1].ID != "weekly" || windows[1].RemainingPercent != 40 {
 		t.Fatalf("weekly window = %+v", windows[1])
 	}
-	// An over-limit window clamps the remaining percentage at zero.
-	if windows[2].ID != "monthly" || windows[2].RemainingPercent != 0 {
-		t.Fatalf("monthly window = %+v", windows[2])
+
+	balances := compatUsageParseBalances("ollama", payload)
+	if len(balances) != 1 {
+		t.Fatalf("balances len = %d, want 1", len(balances))
+	}
+	if balances[0].ID != "purchased_remaining" || balances[0].Amount != 25 {
+		t.Fatalf("purchased balance = %+v", balances[0])
+	}
+}
+
+// TestCompatUsageParseWindowsReadsOllamaModernPlan asserts that a modern Ollama
+// plan, which reports the included balance against the period's allowance, is
+// read as a remaining percentage.
+func TestCompatUsageParseWindowsReadsOllamaModernPlan(t *testing.T) {
+	t.Parallel()
+
+	payload := map[string]any{
+		"included": map[string]any{
+			"balance_usd":   72.5,
+			"allowance_usd": 100.0,
+			"period": map[string]any{
+				"from":  "2026-09-15T09:30:00Z",
+				"until": "2026-10-15T09:30:00Z",
+			},
+		},
+		"purchased": map[string]any{"balance_usd": 25.0},
+	}
+
+	windows := compatUsageParseWindows("ollama", payload)
+	if len(windows) != 1 {
+		t.Fatalf("windows len = %d, want 1", len(windows))
+	}
+	if windows[0].ID != "included" {
+		t.Fatalf("window id = %q, want included", windows[0].ID)
+	}
+	if windows[0].RemainingPercent != 72.5 {
+		t.Fatalf("remaining percent = %v, want 72.5", windows[0].RemainingPercent)
+	}
+	if windows[0].ResetAt != "2026-10-15T09:30:00Z" {
+		t.Fatalf("reset at = %q, want the period end", windows[0].ResetAt)
+	}
+
+	balances := compatUsageParseBalances("ollama", payload)
+	if len(balances) != 2 {
+		t.Fatalf("balances len = %d, want 2", len(balances))
 	}
 }
 
@@ -193,9 +237,9 @@ func TestCompatUsageParseIgnoresUnsupportedAndMalformedValues(t *testing.T) {
 	if got := compatUsageParseWindows("openrouter", map[string]any{"data": "not-an-object"}); len(got) != 0 {
 		t.Fatalf("windows = %+v, want none", got)
 	}
-	// A negative or unparsable usage is ignored.
+	// A negative or unparsable percentage is ignored.
 	if got := compatUsageParseWindows("ollama", map[string]any{
-		"limits": map[string]any{"session": map[string]any{"usage": -1.0}},
+		"included": map[string]any{"session": map[string]any{"remaining_percent": -1.0}},
 	}); len(got) != 0 {
 		t.Fatalf("windows = %+v, want none", got)
 	}
@@ -216,7 +260,7 @@ func TestCompatUsageReaderReportsProviderMeters(t *testing.T) {
 	reader.fetcher = func(_ context.Context, endpoint, key, _ string) ([]byte, int, error) {
 		requestedEndpoint = endpoint
 		requestedKey = key
-		body := `{"limits":{"session":{"usage":0.4,"reset_at":"2026-10-21T00:00:00Z"}}}`
+		body := `{"included":{"session":{"remaining_percent":60,"resets_at":"2026-10-21T00:00:00Z"}}}`
 		return []byte(body), http.StatusOK, nil
 	}
 
@@ -241,7 +285,7 @@ func TestCompatUsageReaderReportsProviderMeters(t *testing.T) {
 	if len(result.Windows) != 1 || result.Windows[0].RemainingPercent != 60 {
 		t.Fatalf("windows = %+v", result.Windows)
 	}
-	if requestedEndpoint != "https://ollama.com/api/usage" {
+	if requestedEndpoint != "https://ollama.com/api/balance" {
 		t.Fatalf("endpoint = %q", requestedEndpoint)
 	}
 	if requestedKey != "ollama-secret-key-1" {
@@ -541,5 +585,97 @@ func TestGetCompatProviderUsageDetailAnswersFromTheScopedNamespace(t *testing.T)
 	h.GetCompatProviderUsageDetail(ginCtx)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+}
+
+func TestCompatUsageDuplicateProviderEntriesGetDistinctIdentifiers(t *testing.T) {
+	t.Parallel()
+
+	// Two entries share a name, a base URL and a key. They are different
+	// credentials, so they must get different identifiers.
+	cfg := &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{
+			{
+				Name:     "ollama-cloud",
+				BaseURL:  "https://ollama.com/v1",
+				Disabled: true,
+				APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+					{APIKey: "shared-key"},
+				},
+			},
+			{
+				Name:    "ollama-cloud",
+				BaseURL: "https://ollama.com/v1",
+				APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+					{APIKey: "shared-key"},
+				},
+			},
+		},
+	}
+
+	credentials := compatUsageListCredentials(cfg)
+	if len(credentials) != 2 {
+		t.Fatalf("credentials len = %d, want 2", len(credentials))
+	}
+	if credentials[0].ID == credentials[1].ID {
+		t.Fatalf("two provider entries share the identifier %q", credentials[0].ID)
+	}
+	if credentials[0].Enabled {
+		t.Fatal("the first entry is disabled")
+	}
+	if !credentials[1].Enabled {
+		t.Fatal("the second entry is enabled")
+	}
+
+	// Reading the enabled entry must not resolve to the disabled one.
+	reader := newCompatUsageReader()
+	reader.fetcher = func(_ context.Context, _ string, _ string, _ string) ([]byte, int, error) {
+		return []byte(`{"included":{"session":{"remaining_percent":50}}}`), http.StatusOK, nil
+	}
+	result, errRead := reader.Read(context.Background(), cfg, credentials[1].ID, false)
+	if errRead != nil {
+		t.Fatalf("Read: %v", errRead)
+	}
+	if !result.Credential.Enabled {
+		t.Fatal("the read resolved to the disabled entry")
+	}
+}
+
+func TestCompatUsageReaderDoesNotCacheAFailure(t *testing.T) {
+	t.Parallel()
+
+	cfg := compatUsageTestConfig()
+	reader := newCompatUsageReader()
+
+	calls := 0
+	reader.fetcher = func(_ context.Context, _ string, _ string, _ string) ([]byte, int, error) {
+		calls++
+		if calls == 1 {
+			// The first read fails.
+			return nil, http.StatusInternalServerError, nil
+		}
+		return []byte(`{"data":{"limit":100,"limit_remaining":25,"usage":75}}`), http.StatusOK, nil
+	}
+
+	credential := compatUsageListCredentials(cfg)[2]
+	first, errRead := reader.Read(context.Background(), cfg, credential.ID, false)
+	if errRead != nil {
+		t.Fatalf("Read: %v", errRead)
+	}
+	if first.Status != "error" {
+		t.Fatalf("first status = %q, want error", first.Status)
+	}
+
+	// The failure must not be served from the cache: the next read contacts the
+	// provider again.
+	second, errRead := reader.Read(context.Background(), cfg, credential.ID, false)
+	if errRead != nil {
+		t.Fatalf("second Read: %v", errRead)
+	}
+	if second.Status != "success" {
+		t.Fatalf("second status = %q, want success (a failure must not be cached)", second.Status)
+	}
+	if calls != 2 {
+		t.Fatalf("upstream calls = %d, want 2", calls)
 	}
 }
