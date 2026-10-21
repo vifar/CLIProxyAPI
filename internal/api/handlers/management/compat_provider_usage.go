@@ -294,7 +294,7 @@ func compatUsageParseWindows(adapterID string, payload map[string]any) []compatU
 	case "ollama":
 		// Ollama Cloud's balance response has two shapes. A modern plan reports
 		// the included balance and allowance for the period; a legacy plan reports
-		// the session and weekly limits with the percentage remaining.
+		// remaining percentages for the individual windows it supplies.
 		included, ok := payload["included"].(map[string]any)
 		if !ok {
 			return windows
