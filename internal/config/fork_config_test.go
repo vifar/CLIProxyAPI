@@ -42,6 +42,11 @@ func TestForkConfigLoads(t *testing.T) {
 	}
 
 	// The compatible providers the fork documents.
+	//
+	// The shipped configuration carries no credentials, so the provider names,
+	// their endpoints and their pinned models are checked instead. The
+	// credentials and the disabled state are checked by the shipped
+	// configuration's own test.
 	wantProviders := map[string]bool{
 		"ollama-cloud": false,
 		"openrouter":   false,
@@ -54,9 +59,6 @@ func TestForkConfigLoads(t *testing.T) {
 		wantProviders[provider.Name] = true
 		if len(provider.Models) == 0 {
 			t.Fatalf("provider %q has no models", provider.Name)
-		}
-		if len(provider.APIKeyEntries) == 0 {
-			t.Fatalf("provider %q has no api-key-entries", provider.Name)
 		}
 	}
 	for name, found := range wantProviders {
