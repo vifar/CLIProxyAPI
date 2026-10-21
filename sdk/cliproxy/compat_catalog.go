@@ -146,6 +146,10 @@ func (m *compatCatalogManager) Start(ctx context.Context) {
 // Refresh reads the live model list of every supported provider and publishes the
 // merged list.
 //
+// Every provider is read on its own goroutine, so a provider that never completes
+// its response cannot block the others, and a provider that has answered
+// publishes its result without waiting for the rest.
+//
 // The publication goes through the service's own configuration commit boundary, so
 // a file reload that commits meanwhile is never overwritten by a stale snapshot.
 func (m *compatCatalogManager) Refresh(ctx context.Context) {
@@ -158,18 +162,33 @@ func (m *compatCatalogManager) Refresh(ctx context.Context) {
 	if cfg == nil {
 		return
 	}
-	for _, target := range compatCatalogTargets(cfg) {
+	targets := compatCatalogTargets(cfg)
+	if len(targets) == 0 {
+		return
+	}
+
+	var wait sync.WaitGroup
+	for _, target := range targets {
 		if ctx.Err() != nil {
 			return
 		}
-		// No deadline is imposed on the upstream request. A provider that
-		// establishes its connection promptly but takes a long time to return its
-		// catalog must not be cancelled while the response is read: the repository
-		// rule is that a timeout may only bound credential acquisition, never the
-		// network behavior after a connection is established. The caller's context
-		// still cancels the pass.
-		m.refreshProvider(ctx, target)
+		wait.Add(1)
+		go func(current compatCatalogTarget) {
+			defer wait.Done()
+			// No deadline is imposed on the upstream request. A provider that
+			// establishes its connection promptly but takes a long time to return
+			// its catalog must not be cancelled while the response is read: the
+			// repository rule is that a timeout may only bound credential
+			// acquisition, never the network behavior after a connection is
+			// established. The caller's context still cancels the pass.
+			m.refreshProvider(ctx, current)
+		}(target)
 	}
+	wait.Wait()
+	if ctx.Err() != nil {
+		return
+	}
+
 	// The publication runs on every refresh, not only when the upstream list
 	// changed. A file reload replaces the augmented configuration with the
 	// provider's static models, so the discovered models have to be reconciled
@@ -268,6 +287,33 @@ func (m *compatCatalogManager) liveModelsFor(target compatCatalogTarget) []confi
 	return state.models
 }
 
+// liveModelsForEntry returns the live model list of the entry at the given
+// position.
+//
+// A negative position means the position is unknown, and the entry is then
+// matched by its name and base URL. Two entries that share a name and a base URL
+// are the same provider as far as the model list is concerned.
+func (m *compatCatalogManager) liveModelsForEntry(entryIndex int, name, baseURL string) []config.CompatCatalogModel {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, state := range m.state {
+		if state == nil {
+			continue
+		}
+		if entryIndex >= 0 && state.target.entryIndex != entryIndex {
+			continue
+		}
+		if !strings.EqualFold(state.target.name, strings.TrimSpace(name)) {
+			continue
+		}
+		if !strings.EqualFold(state.target.baseURL, strings.TrimSpace(baseURL)) {
+			continue
+		}
+		return state.models
+	}
+	return nil
+}
+
 // publishLiveModels applies the live model lists to the running configuration and
 // re-registers the affected credentials, so the added models are published to the
 // model registry and become routable.
@@ -343,41 +389,23 @@ func (m *compatCatalogManager) publishLiveModels(ctx context.Context) {
 	m.service.applyConfigRuntime(coreauth.WithSkipPersist(ctx), commit, true)
 }
 
-// mergeInto merges the cached live model lists into a configuration.
+// modelsFor returns a copy of a provider entry whose model list also carries the
+// models its live model list contributed.
 //
-// The operator's own rows are the ones the catalog manager recorded, so the merge
-// never treats a discovered model as a configured one. A configuration that
-// already carries the discovered rows is unchanged, so the merge is idempotent.
-func (m *compatCatalogManager) mergeInto(cfg *config.Config) *config.Config {
-	if m == nil || cfg == nil {
-		return cfg
+// The entry is a copy, so the configuration the operator wrote is never changed:
+// a discovered row belongs to the runtime, and writing it back would turn it into
+// a permanent pin the live list could never take back.
+func (m *compatCatalogManager) modelsFor(compat *config.OpenAICompatibility) *config.OpenAICompatibility {
+	if m == nil || compat == nil {
+		return compat
 	}
-	targets := compatCatalogTargets(cfg)
-	merged := cfg.CloneForRuntime()
-	if merged == nil {
-		return cfg
+	live := m.liveModelsForEntry(-1, compat.Name, compat.BaseURL)
+	if len(live) == 0 {
+		return compat
 	}
-	for index := range merged.OpenAICompatibility {
-		provider := &merged.OpenAICompatibility[index]
-		target := compatCatalogTarget{
-			entryIndex: index,
-			name:       strings.TrimSpace(provider.Name),
-			baseURL:    strings.TrimSpace(provider.BaseURL),
-		}
-		for _, candidate := range targets {
-			if candidate.entryIndex == index {
-				target = candidate
-				break
-			}
-		}
-		live := m.liveModelsFor(target)
-		if len(live) == 0 {
-			continue
-		}
-		operatorRows := m.operatorRowsFor(index, provider.Models)
-		provider.Models = config.ReconcileCompatCatalogModels(operatorRows, live, provider.ExcludedModels)
-	}
-	return merged
+	copied := *compat
+	copied.Models = config.ReconcileCompatCatalogModels(compat.Models, live, compat.ExcludedModels)
+	return &copied
 }
 
 // compatCatalogModelsEqual reports whether two configured model lists are the same.
