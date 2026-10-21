@@ -102,23 +102,14 @@ type compatCatalogManager struct {
 	mu sync.Mutex
 	// state holds the last known good list per configured entry.
 	state map[string]*compatCatalogState
-	// operatorModels holds the models the operator configured for each entry, so the
-	// live list is always merged onto the operator's own rows.
-	//
-	// The augmented configuration is a runtime artifact: a file reload replaces it
-	// with the operator's static rows, and a supported configuration write could
-	// save it back to the file. Keeping the operator's rows here means a discovered
-	// model can never become a permanent pin.
-	operatorModels map[int][]config.OpenAICompatibilityModel
 }
 
 // newCompatCatalogManager creates a manager for a service.
 func newCompatCatalogManager(service *Service) *compatCatalogManager {
 	return &compatCatalogManager{
-		service:        service,
-		fetcher:        nil,
-		state:          make(map[string]*compatCatalogState),
-		operatorModels: make(map[int][]config.OpenAICompatibilityModel),
+		service: service,
+		fetcher: nil,
+		state:   make(map[string]*compatCatalogState),
 	}
 }
 
@@ -182,6 +173,12 @@ func (m *compatCatalogManager) Refresh(ctx context.Context) {
 			// acquisition, never the network behavior after a connection is
 			// established. The caller's context still cancels the pass.
 			m.refreshProvider(ctx, current)
+			// Each provider publishes as soon as it has answered, so a provider
+			// that never completes its response cannot hold back the results the
+			// others returned.
+			if ctx.Err() == nil {
+				m.publishLiveModels(ctx)
+			}
 		}(target)
 	}
 	wait.Wait()
@@ -190,9 +187,9 @@ func (m *compatCatalogManager) Refresh(ctx context.Context) {
 	}
 
 	// The publication runs on every refresh, not only when the upstream list
-	// changed. A file reload replaces the augmented configuration with the
-	// provider's static models, so the discovered models have to be reconciled
-	// back even when the provider still reports the same list.
+	// changed. A file reload replaces the configuration with the provider's
+	// static models, so the discovered models have to be reconciled back even
+	// when the provider still reports the same list.
 	m.publishLiveModels(ctx)
 }
 
@@ -314,79 +311,20 @@ func (m *compatCatalogManager) liveModelsForEntry(entryIndex int, name, baseURL 
 	return nil
 }
 
-// publishLiveModels applies the live model lists to the running configuration and
-// re-registers the affected credentials, so the added models are published to the
-// model registry and become routable.
+// publishLiveModels publishes the live model lists to the model registry.
 //
-// The configured list is always the floor: a live list only adds models the
-// configuration does not mention, and it never removes a configured model.
+// The configuration is not changed. The discovered models are merged into a copy of
+// the provider entry at the model registration boundary, which is where routing
+// reads them from, so nothing discovered can be written back to the configuration
+// file.
 //
-// The publication is guarded by the configuration sequence the merge was computed
-// against. A file reload that committed meanwhile is therefore never overwritten by
-// a stale snapshot, and the reload's own models stand.
+// All that is needed here is to re-register the affected credentials, so the merged
+// models reach the model registry.
 func (m *compatCatalogManager) publishLiveModels(ctx context.Context) {
 	if m == nil || m.service == nil {
 		return
 	}
-	// The configuration and its sequence are read together, under the same lock
-	// the commits use, so the snapshot and the sequence always describe the same
-	// configuration.
-	current, sequence := m.service.configSnapshot()
-	if current == nil {
-		return
-	}
-
-	targets := compatCatalogTargets(current)
-	merged := current.CloneForRuntime()
-	if merged == nil {
-		return
-	}
-	changed := false
-	for index := range merged.OpenAICompatibility {
-		provider := &merged.OpenAICompatibility[index]
-		target := compatCatalogTarget{
-			entryIndex: index,
-			name:       strings.TrimSpace(provider.Name),
-			baseURL:    strings.TrimSpace(provider.BaseURL),
-		}
-		for _, candidate := range targets {
-			if candidate.entryIndex == index {
-				target = candidate
-				break
-			}
-		}
-		live := m.liveModelsFor(target)
-		if len(live) == 0 {
-			continue
-		}
-		// The operator's own rows are the ones the configuration held when this
-		// entry was first seen. The live list is merged onto them, so a model the
-		// provider stopped listing is dropped, and a discovered row can never
-		// become a permanent pin.
-		operatorRows := m.operatorRowsFor(index, provider.Models)
-		updated := config.ReconcileCompatCatalogModels(operatorRows, live, provider.ExcludedModels)
-		if compatCatalogModelsEqual(provider.Models, updated) {
-			continue
-		}
-		provider.Models = updated
-		changed = true
-	}
-	if !changed {
-		return
-	}
-
-	// The merge is committed only while the configuration it was computed against
-	// is still the current one. The check and the write happen under the same
-	// lock, so a reload that committed in the meantime is never overwritten by a
-	// stale snapshot, and the reload's own models stand.
-	commit := m.service.commitConfigUpdateIfCurrent(merged, sequence)
-	if commit.cfg == nil {
-		return
-	}
-
-	// The runtime application re-registers the affected credentials, so the added
-	// models are published to the model registry and become routable.
-	m.service.applyConfigRuntime(coreauth.WithSkipPersist(ctx), commit, true)
+	m.service.registerConfigAPIKeyAuths(coreauth.WithSkipPersist(ctx), m.service.currentConfig())
 }
 
 // modelsFor returns a copy of a provider entry whose model list also carries the
@@ -419,23 +357,4 @@ func compatCatalogModelsEqual(left, right []config.OpenAICompatibilityModel) boo
 		}
 	}
 	return true
-}
-
-// operatorRowsFor returns the models the operator configured for one entry.
-//
-// The rows are recorded the first time the entry is seen. A later configuration
-// that already carries discovered models does not replace them, so the operator's
-// own rows stay distinguishable from the live list's contribution.
-func (m *compatCatalogManager) operatorRowsFor(entryIndex int, current []config.OpenAICompatibilityModel) []config.OpenAICompatibilityModel {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.operatorModels == nil {
-		m.operatorModels = make(map[int][]config.OpenAICompatibilityModel)
-	}
-	recorded, ok := m.operatorModels[entryIndex]
-	if !ok {
-		recorded = append([]config.OpenAICompatibilityModel(nil), current...)
-		m.operatorModels[entryIndex] = recorded
-	}
-	return recorded
 }

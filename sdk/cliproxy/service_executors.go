@@ -39,10 +39,10 @@ func (s *Service) newOpenAICompatibilityRegistrationCache() *openAICompatibility
 	if s == nil {
 		return nil
 	}
-	return newOpenAICompatibilityRegistrationCacheForConfig(s.currentConfig())
+	return newOpenAICompatibilityRegistrationCacheForConfig(s.currentConfig(), s.compatCatalogManager())
 }
 
-func newOpenAICompatibilityRegistrationCacheForConfig(cfg *config.Config) *openAICompatibilityRegistrationCache {
+func newOpenAICompatibilityRegistrationCacheForConfig(cfg *config.Config, manager *compatCatalogManager) *openAICompatibilityRegistrationCache {
 	if cfg == nil || len(cfg.OpenAICompatibility) == 0 {
 		return nil
 	}
@@ -68,7 +68,12 @@ func newOpenAICompatibilityRegistrationCacheForConfig(cfg *config.Config) *openA
 			// The exclusions are applied against the upstream model name inside
 			// buildOpenAICompatibilityConfigModels, so they hold for this cached
 			// path as well.
-			models: buildOpenAICompatibilityConfigModels(compat),
+			//
+			// The models a provider's live model list contributed are merged in
+			// here, at the registration boundary, rather than in the configuration.
+			// The configuration is the operator's, and a discovered row written back
+			// would become a permanent pin.
+			models: buildOpenAICompatibilityConfigModels(manager.modelsFor(compat)),
 		}
 		cache.byIndex[i] = entry
 		if _, exists := cache.byName[key]; !exists {

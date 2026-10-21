@@ -867,6 +867,17 @@ func compatCatalogUpstreamName(model config.OpenAICompatibilityModel) string {
 	return strings.TrimSpace(model.Alias)
 }
 
+// compatCatalogManager returns the live model catalog manager, or nil when the
+// live model list is not in use.
+func (s *Service) compatCatalogManager() *compatCatalogManager {
+	if s == nil {
+		return nil
+	}
+	s.cfgMu.RLock()
+	defer s.cfgMu.RUnlock()
+	return s.compatCatalog
+}
+
 // compatModelsFor returns a provider entry whose model list also carries the
 // models its live model list contributed.
 //
@@ -874,12 +885,7 @@ func compatCatalogUpstreamName(model config.OpenAICompatibilityModel) string {
 // a discovered row belongs to the runtime, and writing it back would turn it into
 // a permanent pin the live list could never take back.
 func (s *Service) compatModelsFor(compat *config.OpenAICompatibility) *config.OpenAICompatibility {
-	if s == nil || compat == nil {
-		return compat
-	}
-	s.cfgMu.RLock()
-	manager := s.compatCatalog
-	s.cfgMu.RUnlock()
+	manager := s.compatCatalogManager()
 	if manager == nil {
 		return compat
 	}

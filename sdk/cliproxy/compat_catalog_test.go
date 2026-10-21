@@ -124,37 +124,6 @@ func TestOpenAICompatibilityExclusionMatchesTheUpstreamName(t *testing.T) {
 	}
 }
 
-// TestCompatCatalogOperatorRowsAreKeptApartFromTheLiveList asserts that the
-// operator's configured rows and the live list's contribution stay apart.
-//
-// The augmented configuration is a runtime artifact: a file reload replaces it
-// with the operator's static rows, and a supported configuration write could save
-// it back to the file. The manager therefore keeps the operator's rows, so a
-// discovered model can never become a permanent pin.
-func TestCompatCatalogOperatorRowsAreKeptApartFromTheLiveList(t *testing.T) {
-	t.Parallel()
-
-	service := &Service{cfg: &config.Config{}}
-	manager := newCompatCatalogManager(service)
-
-	operatorRows := []config.OpenAICompatibilityModel{{Name: "operator-model", Alias: "operator-model"}}
-	// The first publication records the operator's rows.
-	if got := manager.operatorRowsFor(0, operatorRows); len(got) != 1 || got[0].Name != "operator-model" {
-		t.Fatalf("operator rows = %+v", got)
-	}
-
-	// A later configuration that already carries a discovered model does not
-	// replace the operator's rows.
-	augmented := []config.OpenAICompatibilityModel{
-		{Name: "operator-model", Alias: "operator-model"},
-		{Name: "discovered", Alias: "discovered"},
-	}
-	got := manager.operatorRowsFor(0, augmented)
-	if len(got) != 1 || got[0].Name != "operator-model" {
-		t.Fatalf("operator rows = %+v, want only the operator's row", got)
-	}
-}
-
 // TestCompatCatalogModelsForKeepsTheConfigurationUntouched asserts that the
 // models a provider's live list contributed are merged into a copy, never into the
 // configuration the operator wrote.
@@ -247,19 +216,75 @@ func TestCompatCatalogRefreshIsolatesProviders(t *testing.T) {
 	}
 
 	// The answered provider's list is available even though the other one has not
-	// returned.
+	// returned. The state is read under the manager's lock, because the refresh
+	// writes it.
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
+		manager.mu.Lock()
+		found := false
 		for _, state := range manager.state {
 			if state != nil && state.target.name == "openrouter" && len(state.models) == 1 {
-				cancel()
-				<-done
-				return
+				found = true
+				break
 			}
+		}
+		manager.mu.Unlock()
+		if found {
+			cancel()
+			<-done
+			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	cancel()
 	<-done
 	t.Fatal("the answered provider's result was not recorded while the other one stalled")
+}
+
+// TestCompatCatalogPublishDoesNotChangeTheConfiguration asserts that publishing the
+// live model lists leaves the configuration alone.
+//
+// The configuration is handed to the management API, and a supported configuration
+// write saves it back to the file. A discovered row written back would lose its
+// origin and become a permanent operator pin the live list could never take back.
+func TestCompatCatalogPublishDoesNotChangeTheConfiguration(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{
+			{
+				Name:    "ollama-cloud",
+				BaseURL: "https://ollama.com/v1",
+				APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+					{APIKey: "k"},
+				},
+				Models: []config.OpenAICompatibilityModel{{Name: "operator-model", Alias: "operator-model"}},
+			},
+		},
+	}
+	service := &Service{cfg: cfg}
+	manager := newCompatCatalogManager(service)
+
+	target := compatCatalogTarget{
+		entryIndex: 0,
+		name:       "ollama-cloud",
+		baseURL:    "https://ollama.com/v1",
+		apiKey:     "k",
+	}
+	manager.mu.Lock()
+	manager.state[target.key()] = &compatCatalogState{
+		target: target,
+		models: []config.CompatCatalogModel{{ID: "discovered-model"}},
+	}
+	manager.mu.Unlock()
+
+	manager.publishLiveModels(context.Background())
+
+	// The configuration still holds only the operator's row.
+	if len(cfg.OpenAICompatibility[0].Models) != 1 {
+		t.Fatalf("the configuration was changed: %+v", cfg.OpenAICompatibility[0].Models)
+	}
+	if cfg.OpenAICompatibility[0].Models[0].Name != "operator-model" {
+		t.Fatalf("the configuration was changed: %+v", cfg.OpenAICompatibility[0].Models)
+	}
 }
