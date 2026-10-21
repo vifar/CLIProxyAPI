@@ -98,6 +98,8 @@ retain the corresponding business operation's fields.
 | `/observability/logs/requests/<id>` | GET | Get a request log. |
 | `/observability/usage/api-keys` | GET | Get API-key usage. |
 | `/observability/usage/queue` | GET | Get queued usage events. |
+| `/observability/usage/compatible-providers` | GET | [List compatible-provider credentials](#compatible-provider-usage-meters). |
+| `/observability/usage/compatible-providers/<id>` | GET | [Read a provider usage meter](#compatible-provider-usage-meters). |
 | `/credentials` | GET, POST, DELETE | List, upload, or delete credential files. |
 | `/credentials/models` | GET | Get credential models. |
 | `/credentials/download` | GET | Download a credential file. |
@@ -115,6 +117,66 @@ retain the corresponding business operation's fields.
 | `/plugins/store` | GET | List the plugin store. |
 | `/plugins/store/<id>/install` | POST | Install or update a plugin. |
 | `/plugins/<id>/quota` | GET, POST, DELETE | Read, fetch, or reset plugin quota. |
+
+### Compatible-provider usage meters
+
+These endpoints read provider-reported allowances and balances for configured
+OpenAI-compatible API keys. They do not aggregate proxy request statistics and
+have no `/v0/management` equivalent. The access policy above applies.
+
+`GET /observability/usage/compatible-providers` returns
+`{"credentials":[...]}` without contacting upstream providers. It includes every
+nonempty configured key in configuration order, including disabled and
+unsupported entries. Each credential contains:
+
+| Field | Meaning |
+| --- | --- |
+| `id` | Opaque identifier for detail requests; never contains the API key. |
+| `provider_name` | Configured provider name. |
+| `key_number` | One-based key position within its provider entry. |
+| `enabled` | Whether the provider entry is enabled. |
+| `supported` | Whether its base URL matches a supported meter adapter. |
+| `scope` | `account` for Ollama Cloud, `key` for OpenRouter; defaults to `account` for unsupported entries. |
+
+Use IDs from the current list. They are stable for unchanged credentials within
+one process, but change on key rotation, provider name or base URL changes,
+provider/key position changes, and server restart.
+
+Supported base URLs use HTTPS, with no userinfo, explicit port, query, or fragment.
+Trailing slashes are accepted. Support is determined by the URL, regardless of
+the configured provider name:
+
+| Host | Accepted paths | Meter request | Reported data, when available |
+| --- | --- | --- | --- |
+| `ollama.com` | Empty or `/v1` | `https://ollama.com/api/balance` | Account-wide `session` and `weekly` windows, or an `included` allowance window; `purchased_remaining` and `included_remaining` balances. |
+| `openrouter.ai` | Empty, `/api`, or `/api/v1` | `https://openrouter.ai/api/v1/key` | `key_budget` window when a positive key limit and remaining amount exist; `key_remaining` and `key_spent` balances. |
+
+Meter requests send the selected API key only to the fixed provider endpoint and
+do not follow redirects. They use the per-key proxy when configured, otherwise
+the global proxy. Management responses omit API keys and upstream error bodies.
+
+`GET /observability/usage/compatible-providers/<id>` returns `credential` with the
+fields above, `status`, and the arrays `windows` and `balances` (empty when no
+values are available). Windows contain `id`, `used_percent`, `remaining_percent`,
+and optional `reset_at` in UTC RFC3339. Percentages are bounded to 0–100. Balances
+contain `id`, numeric `amount`, and `currency` (`USD`). A decoded upstream response
+also includes `fetched_at` in UTC RFC3339; cached responses retain that timestamp.
+
+| `status` | Meaning |
+| --- | --- |
+| `success` | At least one window or balance was read. |
+| `unavailable` | The upstream JSON contains no recognized usable meter values. |
+| `unsupported` | No adapter matches the configured base URL; no upstream request is made. |
+| `disabled` | The provider entry is disabled; no upstream request is made. |
+| `error` | The upstream request failed, returned a non-2xx status, or returned invalid JSON. `http_status` is included for a non-2xx upstream response. |
+
+These reports use HTTP `200` even when `status` is not `success`; inspect the
+report status. An unknown credential ID returns HTTP `404`. Missing runtime
+configuration returns HTTP `503`.
+
+Successful reads are cached for 30 seconds per credential; other report statuses
+are not cached. Add `?refresh=true` to bypass a cached result. Concurrent reads
+for the same credential share an in-flight fetch, including forced refreshes.
 
 ## OAuth
 

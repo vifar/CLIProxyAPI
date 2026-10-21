@@ -63,6 +63,8 @@ type Handler struct {
 	pluginReleases          pluginReleaseCache
 	siwcOAuthFactory        func(*config.Config) siwcOAuthService
 	siwcCommitMu            sync.Mutex
+	compatUsageOnce         sync.Once
+	compatUsageReader       *compatUsageReader
 }
 
 type configReloadSnapshot struct {
