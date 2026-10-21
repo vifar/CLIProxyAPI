@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -211,7 +212,7 @@ func TestCompatUsageReaderReportsProviderMeters(t *testing.T) {
 
 	var requestedEndpoint string
 	var requestedKey string
-	reader.fetcher = func(_ context.Context, endpoint, key string) ([]byte, int, error) {
+	reader.fetcher = func(_ context.Context, endpoint, key, _ string) ([]byte, int, error) {
 		requestedEndpoint = endpoint
 		requestedKey = key
 		body := `{"limits":{"session":{"usage":0.4,"reset_at":"2026-10-21T00:00:00Z"}}}`
@@ -278,7 +279,7 @@ func TestCompatUsageReaderReportsUnsupportedAndDisabled(t *testing.T) {
 		},
 	}
 	reader := newCompatUsageReader()
-	reader.fetcher = func(_ context.Context, _ string, _ string) ([]byte, int, error) {
+	reader.fetcher = func(_ context.Context, _ string, _ string, _ string) ([]byte, int, error) {
 		t.Fatal("the reader must not query an unsupported or disabled credential")
 		return nil, 0, nil
 	}
@@ -326,7 +327,7 @@ func TestCompatUsageReaderCachesWithinTheTTL(t *testing.T) {
 	reader.now = func() time.Time { return now }
 
 	calls := 0
-	reader.fetcher = func(_ context.Context, _ string, _ string) ([]byte, int, error) {
+	reader.fetcher = func(_ context.Context, _ string, _ string, _ string) ([]byte, int, error) {
 		calls++
 		return []byte(`{"data":{"limit":100,"limit_remaining":50,"usage":50}}`), http.StatusOK, nil
 	}
@@ -356,7 +357,7 @@ func TestCompatUsageReaderReportsUpstreamErrorWithoutTheBody(t *testing.T) {
 
 	cfg := compatUsageTestConfig()
 	reader := newCompatUsageReader()
-	reader.fetcher = func(_ context.Context, _ string, _ string) ([]byte, int, error) {
+	reader.fetcher = func(_ context.Context, _ string, _ string, _ string) ([]byte, int, error) {
 		// The upstream error body can contain account metadata. It must not be
 		// returned to the caller.
 		return []byte(`{"error":"account email@example.com is over limit"}`), http.StatusForbidden, nil
@@ -414,6 +415,113 @@ func TestGetCompatProviderUsageEndpoints(t *testing.T) {
 	rec = httptest.NewRecorder()
 	ginCtx, _ = gin.CreateTestContext(rec)
 	ginCtx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/openai-compatibility/usage/unknown", nil)
+	ginCtx.Params = gin.Params{{Key: "id", Value: "unknown"}}
+	h.GetCompatProviderUsageDetail(ginCtx)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+}
+
+func TestCompatUsageReaderConcurrentWaitersGetTheResult(t *testing.T) {
+	t.Parallel()
+
+	cfg := compatUsageTestConfig()
+	reader := newCompatUsageReader()
+
+	release := make(chan struct{})
+	started := make(chan struct{})
+	var once sync.Once
+	reader.fetcher = func(_ context.Context, _ string, _ string, _ string) ([]byte, int, error) {
+		once.Do(func() { close(started) })
+		<-release
+		return []byte(`{"data":{"limit":100,"limit_remaining":25,"usage":75}}`), http.StatusOK, nil
+	}
+
+	credential := compatUsageListCredentials(cfg)[2]
+
+	// The first read takes the in-flight slot; the second must wait for it.
+	type outcome struct {
+		result compatUsageResponse
+		err    error
+	}
+	results := make(chan outcome, 2)
+
+	go func() {
+		result, err := reader.Read(context.Background(), cfg, credential.ID, false)
+		results <- outcome{result, err}
+	}()
+	<-started
+
+	go func() {
+		result, err := reader.Read(context.Background(), cfg, credential.ID, false)
+		results <- outcome{result, err}
+	}()
+
+	// Give the second read a moment to reach the pending branch.
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+
+	for i := 0; i < 2; i++ {
+		select {
+		case got := <-results:
+			if got.err != nil {
+				t.Fatalf("read %d: %v", i, got.err)
+			}
+			if got.result.Status != "success" {
+				t.Fatalf("read %d status = %q, want success (a waiter must not observe a zero-value report)", i, got.result.Status)
+			}
+			if len(got.result.Balances) == 0 {
+				t.Fatalf("read %d has no balances (a waiter must observe the published result)", i)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("a read did not return")
+		}
+	}
+}
+
+func TestCompatUsageReaderCarriesTheCredentialProxy(t *testing.T) {
+	t.Parallel()
+
+	cfg := compatUsageTestConfig()
+	cfg.ProxyURL = "http://proxy.example.com:8080"
+	cfg.OpenAICompatibility[0].APIKeyEntries[0].ProxyURL = "http://key-proxy.example.com:8080"
+
+	reader := newCompatUsageReader()
+	var seenProxy string
+	reader.fetcher = func(_ context.Context, _ string, _ string, proxyURL string) ([]byte, int, error) {
+		seenProxy = proxyURL
+		return []byte(`{"data":{"limit":100,"limit_remaining":25,"usage":75}}`), http.StatusOK, nil
+	}
+
+	credential := compatUsageListCredentials(cfg)[0]
+	if _, errRead := reader.Read(context.Background(), cfg, credential.ID, false); errRead != nil {
+		t.Fatalf("Read: %v", errRead)
+	}
+	if seenProxy != "http://key-proxy.example.com:8080" {
+		t.Fatalf("proxy = %q, want the credential's own proxy", seenProxy)
+	}
+
+	// Without a per-key proxy the global one is used.
+	cfg.OpenAICompatibility[0].APIKeyEntries[0].ProxyURL = ""
+	second := compatUsageListCredentials(cfg)[1]
+	if _, errRead := reader.Read(context.Background(), cfg, second.ID, false); errRead != nil {
+		t.Fatalf("Read: %v", errRead)
+	}
+	if seenProxy != "http://proxy.example.com:8080" {
+		t.Fatalf("proxy = %q, want the global proxy", seenProxy)
+	}
+}
+
+func TestGetCompatProviderUsageDetailAnswersFromTheScopedNamespace(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+
+	cfg := compatUsageTestConfig()
+	cfg.AuthDir = t.TempDir()
+	h := NewHandlerWithoutConfigFilePath(cfg, nil)
+
+	rec := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(rec)
+	ginCtx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/observability/usage/compatible-providers/unknown", nil)
 	ginCtx.Params = gin.Params{{Key: "id", Value: "unknown"}}
 	h.GetCompatProviderUsageDetail(ginCtx)
 	if rec.Code != http.StatusNotFound {

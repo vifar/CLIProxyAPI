@@ -19,6 +19,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
 )
 
 // compatUsageMeter is a provider-reported usage window for one credential.
@@ -155,6 +156,10 @@ type compatUsageCredentialKey struct {
 	KeyNumber int
 	// Key is the API key. It never leaves the process.
 	Key string
+	// ProxyURL is the proxy the credential's own requests use, if any. The meter
+	// request uses it too, so a provider reachable only through its proxy reports
+	// a meter.
+	ProxyURL string
 	// Enabled reports whether the credential is active.
 	Enabled bool
 	// Adapter is the balance adapter for the provider, nil when unsupported.
@@ -199,10 +204,17 @@ func compatUsageResolveCredentials(cfg *config.Config) []compatUsageCredentialKe
 		providerName := strings.TrimSpace(provider.Name)
 		baseURL := strings.TrimSpace(provider.BaseURL)
 		adapter := compatUsageAdapterFor(baseURL)
+		providerProxy := strings.TrimSpace(cfg.ProxyURL)
 		for keyIndex, entry := range provider.APIKeyEntries {
 			key := strings.TrimSpace(entry.APIKey)
 			if key == "" {
 				continue
+			}
+			// A per-key proxy overrides the global one, the same way the
+			// credential's own requests resolve it.
+			proxyURL := strings.TrimSpace(entry.ProxyURL)
+			if proxyURL == "" {
+				proxyURL = providerProxy
 			}
 			out = append(out, compatUsageCredentialKey{
 				ID:           compatUsageOpaqueID(providerName, baseURL, keyIndex, key),
@@ -210,6 +222,7 @@ func compatUsageResolveCredentials(cfg *config.Config) []compatUsageCredentialKe
 				BaseURL:      baseURL,
 				KeyNumber:    keyIndex + 1,
 				Key:          key,
+				ProxyURL:     proxyURL,
 				Enabled:      !provider.Disabled,
 				Adapter:      adapter,
 			})
@@ -338,7 +351,7 @@ func compatUsageParseBalances(adapterID string, payload map[string]any) []compat
 // compatUsageReader reads provider usage meters with a short per-credential cache.
 type compatUsageReader struct {
 	// fetcher performs the upstream request. It is replaceable in tests.
-	fetcher func(ctx context.Context, endpoint, key string) ([]byte, int, error)
+	fetcher func(ctx context.Context, endpoint, key, proxyURL string) ([]byte, int, error)
 	// now returns the current time.
 	now func() time.Time
 	// ttl is the cache lifetime of one credential's meter.
@@ -346,12 +359,21 @@ type compatUsageReader struct {
 
 	mu      sync.Mutex
 	cache   map[string]compatUsageCacheEntry
-	pending map[string]chan compatUsageResponse
+	pending map[string]*compatUsagePending
 }
 
 // compatUsageCacheEntry is one cached meter result.
 type compatUsageCacheEntry struct {
 	at     time.Time
+	result compatUsageResponse
+}
+
+// compatUsagePending is an in-flight meter read. The result is published to every
+// waiter, so a waiter never observes a zero-value report.
+type compatUsagePending struct {
+	// done is closed once the result is published.
+	done chan struct{}
+	// result is the published result. It is written before done is closed.
 	result compatUsageResponse
 }
 
@@ -362,13 +384,17 @@ func newCompatUsageReader() *compatUsageReader {
 		now:     time.Now,
 		ttl:     30 * time.Second,
 		cache:   make(map[string]compatUsageCacheEntry),
-		pending: make(map[string]chan compatUsageResponse),
+		pending: make(map[string]*compatUsagePending),
 	}
 }
 
 // compatUsageDefaultFetcher performs the upstream request for a meter. Redirects are
 // never followed, so a redirect cannot move the key to another origin.
-func compatUsageDefaultFetcher(ctx context.Context, endpoint, key string) ([]byte, int, error) {
+//
+// The request carries no whole-request timeout: the repository's rule is that a
+// timeout may only bound credential acquisition, never the network behavior after
+// a connection is established. The request context still cancels the read.
+func compatUsageDefaultFetcher(ctx context.Context, endpoint, key, proxyURL string) ([]byte, int, error) {
 	request, errNew := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if errNew != nil {
 		return nil, 0, errNew
@@ -376,11 +402,17 @@ func compatUsageDefaultFetcher(ctx context.Context, endpoint, key string) ([]byt
 	request.Header.Set("Authorization", "Bearer "+key)
 	request.Header.Set("Accept", "application/json")
 
+	transport, errTransport := compatUsageTransport(proxyURL)
+	if errTransport != nil {
+		return nil, 0, errTransport
+	}
 	client := &http.Client{
-		Timeout: 15 * time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
+	}
+	if transport != nil {
+		client.Transport = transport
 	}
 	response, errDo := client.Do(request)
 	if errDo != nil {
@@ -394,6 +426,20 @@ func compatUsageDefaultFetcher(ctx context.Context, endpoint, key string) ([]byt
 		return nil, response.StatusCode, errRead
 	}
 	return body, response.StatusCode, nil
+}
+
+// compatUsageTransport builds the transport for a meter request, honouring the
+// credential's proxy. A nil transport means the default transport is used.
+func compatUsageTransport(proxyURL string) (*http.Transport, error) {
+	trimmed := strings.TrimSpace(proxyURL)
+	if trimmed == "" {
+		return nil, nil
+	}
+	transport, _, errBuild := proxyutil.BuildHTTPTransport(trimmed)
+	if errBuild != nil {
+		return nil, errBuild
+	}
+	return transport, nil
 }
 
 // errCompatUsageCredentialNotFound marks an unknown credential identifier.
@@ -446,28 +492,33 @@ func (r *compatUsageReader) Read(ctx context.Context, cfg *config.Config, creden
 	if wait, okPending := r.pending[target.ID]; okPending {
 		r.mu.Unlock()
 		select {
-		case result := <-wait:
-			return result, nil
+		case <-wait.done:
+			// The result is published before done is closed, so every waiter reads
+			// the same report.
+			return wait.result, nil
 		case <-ctx.Done():
 			return compatUsageResponse{Status: "error"}, ctx.Err()
 		}
 	}
-	done := make(chan compatUsageResponse, 1)
-	r.pending[target.ID] = done
+	pending := &compatUsagePending{done: make(chan struct{})}
+	r.pending[target.ID] = pending
 	r.mu.Unlock()
 
 	result := r.fetch(ctx, *target, empty)
 	r.mu.Lock()
 	r.cache[target.ID] = compatUsageCacheEntry{at: r.now(), result: result}
+	pending.result = result
 	delete(r.pending, target.ID)
 	r.mu.Unlock()
-	close(done)
+	// The result is written before the channel is closed, so a waiter never
+	// observes a zero-value report.
+	close(pending.done)
 	return result, nil
 }
 
 // fetch reads the meter for one credential from its provider.
 func (r *compatUsageReader) fetch(ctx context.Context, credential compatUsageCredentialKey, empty compatUsageResponse) compatUsageResponse {
-	body, status, errFetch := r.fetcher(ctx, credential.Adapter.Endpoint, credential.Key)
+	body, status, errFetch := r.fetcher(ctx, credential.Adapter.Endpoint, credential.Key, credential.ProxyURL)
 	if errFetch != nil {
 		r.dropCache(credential.ID)
 		empty.Status = "error"
@@ -515,7 +566,9 @@ func (h *Handler) GetCompatProviderUsage(c *gin.Context) {
 		return
 	}
 	h.mu.Lock()
-	cfg := h.cfg
+	// The configuration is snapshotted while the lock is held, because a
+	// concurrent provider edit mutates the same structure under that lock.
+	cfg := h.cfg.CloneForRuntime()
 	h.mu.Unlock()
 	if cfg == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "configuration unavailable"})
@@ -537,7 +590,9 @@ func (h *Handler) GetCompatProviderUsageDetail(c *gin.Context) {
 		return
 	}
 	h.mu.Lock()
-	cfg := h.cfg
+	// The configuration is snapshotted while the lock is held, because a
+	// concurrent provider edit mutates the same structure under that lock.
+	cfg := h.cfg.CloneForRuntime()
 	h.mu.Unlock()
 	if cfg == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "configuration unavailable"})
