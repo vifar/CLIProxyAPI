@@ -1285,7 +1285,16 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	// The provider an existing binding pointed at is captured before the binding
 	// is written, because writing the binding replaces the alias and removes the
 	// old entry.
-	replacedAliasAuthID, replacedAliasProvider := s.replacedAliasProvider(cacheKey, fallbackKey, availabilityCandidates)
+	//
+	// The alias is only an alias when it is not a parent. A subagent's fallback
+	// identifier is its parent's session, and a fork's is its parent's session
+	// too, but those are separate bindings with their own affinity: a subagent
+	// that is bound independently is a new binding, not a replacement of its
+	// parent's.
+	replacedAliasAuthID, replacedAliasProvider := "", ""
+	if !isSubagent && !isFork {
+		replacedAliasAuthID, replacedAliasProvider = s.replacedAliasProvider(cacheKey, fallbackKey, availabilityCandidates)
+	}
 
 	if cachedAuthID, ok := s.cache.GetAndRefresh(cacheKey); ok {
 		for _, auth := range available {
@@ -1390,8 +1399,13 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	// The record is keyed by the binding's own key, so a failure for one model is
 	// not consumed by a request for another. The fallback alias is checked too,
 	// because the primary and the alias point at the same binding.
+	//
+	// The alias is only an alias when it is not a parent. A subagent's fallback
+	// identifier is its parent's session, and a fork's is its parent's session
+	// too, but those are separate bindings with their own affinity: a failure
+	// recorded for the parent is not a failure of the subagent's binding.
 	failedProvider := s.takeFailedBinding(cacheKey)
-	if failedProvider == "" && fallbackKey != "" {
+	if failedProvider == "" && fallbackKey != "" && !isSubagent && !isFork {
 		failedProvider = s.takeFailedBinding(fallbackKey)
 	}
 	if failedProvider != "" {
@@ -1790,26 +1804,31 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 			// and nothing is replaced, so no transition is reported. The explicit
 			// session paths behave the same way.
 			emit = false
-		case replacedProvider != "":
-			// The matched binding's credential was unavailable, so the binding is
-			// replaced. A replacement in the same provider is a credential
-			// reselection; one in another provider is a provider failover.
-			transition = RoutingTransitionCredentialReselected
-			if newProvider != "" && newProvider != replacedProvider {
-				transition = RoutingTransitionProviderFailover
-			}
-			previousProvider = replacedProvider
 		default:
-			// The sequence may have been removed by a credential-attributed failure,
-			// in which case the retry is the replacement of that binding. The
-			// sequence identity is derived from the fingerprints, so it is the
+			// The sequence may have been removed by a credential-attributed
+			// failure, in which case the retry is the replacement of that binding.
+			// The sequence identity is derived from the fingerprints, so it is the
 			// same identity the removal recorded it under.
-			if failedProvider := s.takeFailedBinding(lcpFailedBindingKey(namespace, cliproxysession.SequenceIdentity(fingerprints))); failedProvider != "" {
+			//
+			// The exact sequence's failure takes precedence over a prefix match.
+			// A prefix match can find a surviving ancestor, and that ancestor's
+			// provider is not the provider whose credential actually failed.
+			failedProvider := s.takeFailedBinding(lcpFailedBindingKey(namespace, cliproxysession.SequenceIdentity(fingerprints)))
+			if failedProvider != "" {
 				transition = RoutingTransitionCredentialReselected
 				if newProvider != "" && newProvider != failedProvider {
 					transition = RoutingTransitionProviderFailover
 				}
 				previousProvider = failedProvider
+			} else if replacedProvider != "" {
+				// The matched binding's credential was unavailable, so the binding
+				// is replaced. A replacement in the same provider is a credential
+				// reselection; one in another provider is a provider failover.
+				transition = RoutingTransitionCredentialReselected
+				if newProvider != "" && newProvider != replacedProvider {
+					transition = RoutingTransitionProviderFailover
+				}
+				previousProvider = replacedProvider
 			}
 		}
 		// The bound provider is remembered for every binding that is not

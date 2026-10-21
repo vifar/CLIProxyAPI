@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -53,7 +54,7 @@ func TestRoutingTransitionRecorderCountsEachTransition(t *testing.T) {
 }
 
 func TestRoutingTransitionRecorderKeepsEventsBounded(t *testing.T) {
-	t.Parallel()
+	// The recorder is process-wide, so this test does not run in parallel.
 
 	recorder := NewRoutingTransitionRecorder(3)
 	for i := 0; i < 10; i++ {
@@ -69,7 +70,7 @@ func TestRoutingTransitionRecorderKeepsEventsBounded(t *testing.T) {
 }
 
 func TestRoutingTransitionRecorderBoundsTheCounterKeys(t *testing.T) {
-	t.Parallel()
+	// The recorder is process-wide, so this test does not run in parallel.
 
 	recorder := NewRoutingTransitionRecorder(10)
 	// A hostile client sends a very long model name. The key must be bounded.
@@ -89,7 +90,7 @@ func TestRoutingTransitionRecorderBoundsTheCounterKeys(t *testing.T) {
 }
 
 func TestRoutingTransitionRecorderTruncatesTheSessionIdentifier(t *testing.T) {
-	t.Parallel()
+	// The recorder is process-wide, so this test does not run in parallel.
 
 	recorder := NewRoutingTransitionRecorder(10)
 	recorder.Record(RoutingTransitionEvent{
@@ -103,6 +104,24 @@ func TestRoutingTransitionRecorderTruncatesTheSessionIdentifier(t *testing.T) {
 	if len(events[0].Session) >= 64 {
 		t.Fatalf("session was not truncated: %q", events[0].Session)
 	}
+}
+
+// routingTransitionRecorderMu serializes the tests that install the process-wide
+// routing transition recorder.
+//
+// The recorder is a process-wide global, so two tests that install it would
+// record into each other's recorder and restore each other's previous value.
+var routingTransitionRecorderMu sync.Mutex
+
+// installRoutingTransitionRecorder installs a recorder for the duration of a test
+// and returns the function that restores the previous one.
+func installRoutingTransitionRecorder(t *testing.T, recorder *RoutingTransitionRecorder) {
+	t.Helper()
+	routingTransitionRecorderMu.Lock()
+	t.Cleanup(routingTransitionRecorderMu.Unlock)
+	previous := GetRoutingTransitionRecorder()
+	SetRoutingTransitionRecorder(recorder)
+	t.Cleanup(func() { SetRoutingTransitionRecorder(previous) })
 }
 
 // routingTransitionTestSelector builds a selector with two providers serving one
@@ -134,9 +153,7 @@ func routingTransitionTestSelector(t *testing.T, recorder *RoutingTransitionReco
 		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
 	}
 
-	previous := GetRoutingTransitionRecorder()
-	SetRoutingTransitionRecorder(recorder)
-	t.Cleanup(func() { SetRoutingTransitionRecorder(previous) })
+	installRoutingTransitionRecorder(t, recorder)
 
 	return selector, manager, providerA, model
 }
@@ -268,7 +285,7 @@ func TestRoutingTransitionRecordsProviderFailover(t *testing.T) {
 // and provider names are capped and the overflow is folded into a bounded bucket.
 // The aggregate totals must stay exact.
 func TestRoutingTransitionRecorderBoundsTheCounterCardinality(t *testing.T) {
-	t.Parallel()
+	// The recorder is process-wide, so this test does not run in parallel.
 
 	recorder := NewRoutingTransitionRecorder(10)
 	limit := maxRoutingTransitionModels
@@ -298,12 +315,10 @@ func TestRoutingTransitionRecorderBoundsTheCounterCardinality(t *testing.T) {
 // enters the legacy mixed path. The transition has to be recorded there too, or
 // the counter would only see the fast path.
 func TestRoutingTransitionRecordsNoEligibleProviderOnTheAffinityPath(t *testing.T) {
-	t.Parallel()
+	// The recorder is process-wide, so this test does not run in parallel.
 
 	recorder := NewRoutingTransitionRecorder(10)
-	previous := GetRoutingTransitionRecorder()
-	SetRoutingTransitionRecorder(recorder)
-	t.Cleanup(func() { SetRoutingTransitionRecorder(previous) })
+	installRoutingTransitionRecorder(t, recorder)
 
 	manager := NewManager(nil, nil, nil)
 	affinity := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
