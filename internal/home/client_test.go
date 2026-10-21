@@ -1666,7 +1666,7 @@ func TestConfigSubscriberUsesAppliedLifecycleRevisionAndRebuildsCommands(t *test
 }
 
 func TestRunConfigSubscriberLifetimeReturnsAfterHeartbeatLoss(t *testing.T) {
-	configPayload := "credential-concurrency:\n  lifecycle-config-revision: 1\n  cpa-heartbeat-timeout: 5s\n"
+	configPayload := "credential-concurrency:\n  lifecycle-config-revision: 1\n  cpa-heartbeat-timeout: 20ms\n"
 	listener, errListen := net.Listen("tcp", "127.0.0.1:0")
 	if errListen != nil {
 		t.Fatalf("listen: %v", errListen)
@@ -1740,15 +1740,7 @@ func TestRunConfigSubscriberLifetimeReturnsAfterHeartbeatLoss(t *testing.T) {
 			return errSet
 		}
 		return nil
-	}, func() {
-		// Start the short heartbeat deadline only after the subscription and command probe are ready.
-		cfg := client.LimiterConfig()
-		cfg.CPAHeartbeatTimeout = 20 * time.Millisecond
-		if errSet := client.SetLifecycleConfig(cfg); errSet != nil {
-			t.Fatalf("SetLifecycleConfig() after readiness: %v", errSet)
-		}
-		ready <- recoveryState(client.recoveryState.Load()) == recoveryStateStable
-	})
+	}, func() { ready <- recoveryState(client.recoveryState.Load()) == recoveryStateStable })
 	if errRun == nil {
 		t.Fatal("RunConfigSubscriberLifetime() error = nil after heartbeat loss")
 	}
