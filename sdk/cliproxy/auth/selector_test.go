@@ -2043,7 +2043,11 @@ func TestSessionAffinitySelector_CrossProviderIsolation(t *testing.T) {
 func TestSessionCache_GetAndRefresh(t *testing.T) {
 	t.Parallel()
 
-	cache := NewSessionCache(100 * time.Millisecond)
+	// The TTL is long enough that a loaded machine does not expire the entry
+	// between the access and the check. The entry's own expiry is exercised
+	// below, where the wait is generous.
+	const ttl = 2 * time.Second
+	cache := NewSessionCache(ttl)
 	defer cache.Stop()
 
 	cache.Set("session1", "auth1")
@@ -2055,22 +2059,23 @@ func TestSessionCache_GetAndRefresh(t *testing.T) {
 	}
 
 	// Wait half TTL and access again (should refresh)
-	time.Sleep(60 * time.Millisecond)
+	time.Sleep(ttl / 2)
 	got, ok = cache.GetAndRefresh("session1")
 	if !ok || got != "auth1" {
-		t.Fatalf("GetAndRefresh() after 60ms = %q, %v, want auth1, true", got, ok)
+		t.Fatalf("GetAndRefresh() after half the TTL = %q, %v, want auth1, true", got, ok)
 	}
 
-	// Wait another 60ms (total 120ms from original, but TTL refreshed at 60ms)
+	// Wait another half TTL (a full TTL from the original, but the TTL was
+	// refreshed at the access above).
 	// Entry should still be valid because TTL was refreshed
-	time.Sleep(60 * time.Millisecond)
+	time.Sleep(ttl / 2)
 	got, ok = cache.GetAndRefresh("session1")
 	if !ok || got != "auth1" {
 		t.Fatalf("GetAndRefresh() after refresh = %q, %v, want auth1, true (TTL should have been refreshed)", got, ok)
 	}
 
 	// Now wait full TTL without access
-	time.Sleep(110 * time.Millisecond)
+	time.Sleep(ttl + 100*time.Millisecond)
 	got, ok = cache.GetAndRefresh("session1")
 	if ok {
 		t.Fatalf("GetAndRefresh() after expiry = %q, %v, want '', false", got, ok)
