@@ -41,6 +41,12 @@ type OpenAICompatibility = internalconfig.OpenAICompatibility
 type OpenAICompatibilityAPIKey = internalconfig.OpenAICompatibilityAPIKey
 type OpenAICompatibilityModel = internalconfig.OpenAICompatibilityModel
 
+// CompatCatalogModelExcluded reports whether a model ID matches one of the
+// provider's exclusion patterns.
+func CompatCatalogModelExcluded(modelID string, excluded []string) bool {
+	return internalconfig.CompatCatalogModelExcluded(modelID, excluded)
+}
+
 type TLS = internalconfig.TLSConfig
 
 const (

@@ -49,14 +49,14 @@ func TestCompatCatalogModelListReadsTheProviderList(t *testing.T) {
 
 	var requestedEndpoint string
 	var requestedKey string
-	fetcher := func(_ context.Context, endpoint, apiKey string) ([]byte, int, error) {
+	fetcher := func(_ context.Context, endpoint, apiKey, _ string) ([]byte, int, error) {
 		requestedEndpoint = endpoint
 		requestedKey = apiKey
 		body := `{"data":[{"id":"deepseek-v4.1-flash","name":"DeepSeek V4.1 Flash","context_length":131072},{"id":"glm-5.3"}]}`
 		return []byte(body), http.StatusOK, nil
 	}
 
-	models, errList := CompatCatalogModelList(context.Background(), "https://ollama.com/v1", "ollama-key", fetcher)
+	models, errList := CompatCatalogModelList(context.Background(), "https://ollama.com/v1", "ollama-key", "", fetcher)
 	if errList != nil {
 		t.Fatalf("CompatCatalogModelList: %v", errList)
 	}
@@ -84,7 +84,7 @@ func TestCompatCatalogModelListUsesTheProviderEndpointNotTheConfiguredPath(t *te
 	t.Parallel()
 
 	var requestedEndpoint string
-	fetcher := func(_ context.Context, endpoint, _ string) ([]byte, int, error) {
+	fetcher := func(_ context.Context, endpoint, _, _ string) ([]byte, int, error) {
 		requestedEndpoint = endpoint
 		return []byte(`{"data":[{"id":"m1"}]}`), http.StatusOK, nil
 	}
@@ -92,7 +92,7 @@ func TestCompatCatalogModelListUsesTheProviderEndpointNotTheConfiguredPath(t *te
 	// The configured base URL carries a different path; the endpoint must be the
 	// provider's own model list endpoint, so the key only ever reaches the origin
 	// it was configured for.
-	if _, errList := CompatCatalogModelList(context.Background(), "https://openrouter.ai/api/v1", "", fetcher); errList != nil {
+	if _, errList := CompatCatalogModelList(context.Background(), "https://openrouter.ai/api/v1", "", "", fetcher); errList != nil {
 		t.Fatalf("CompatCatalogModelList: %v", errList)
 	}
 	if requestedEndpoint != "https://openrouter.ai/api/v1/models" {
@@ -103,11 +103,11 @@ func TestCompatCatalogModelListUsesTheProviderEndpointNotTheConfiguredPath(t *te
 func TestCompatCatalogModelListRequiresAKeyWhereTheProviderNeedsOne(t *testing.T) {
 	t.Parallel()
 
-	fetcher := func(_ context.Context, _ string, _ string) ([]byte, int, error) {
+	fetcher := func(_ context.Context, _ string, _ string, _ string) ([]byte, int, error) {
 		t.Fatal("the reader must not query a provider that needs a key without one")
 		return nil, 0, nil
 	}
-	if _, errList := CompatCatalogModelList(context.Background(), "https://ollama.com/v1", "", fetcher); errList == nil {
+	if _, errList := CompatCatalogModelList(context.Background(), "https://ollama.com/v1", "", "", fetcher); errList == nil {
 		t.Fatal("expected an error when the required key is missing")
 	}
 }
@@ -115,24 +115,24 @@ func TestCompatCatalogModelListRequiresAKeyWhereTheProviderNeedsOne(t *testing.T
 func TestCompatCatalogModelListRejectsBadResponses(t *testing.T) {
 	t.Parallel()
 
-	upstreamError := func(_ context.Context, _ string, _ string) ([]byte, int, error) {
+	upstreamError := func(_ context.Context, _ string, _ string, _ string) ([]byte, int, error) {
 		return []byte(`{"error":"nope"}`), http.StatusForbidden, nil
 	}
-	if _, errList := CompatCatalogModelList(context.Background(), "https://ollama.com/v1", "k", upstreamError); errList == nil {
+	if _, errList := CompatCatalogModelList(context.Background(), "https://ollama.com/v1", "k", "", upstreamError); errList == nil {
 		t.Fatal("expected an error for a non-2xx response")
 	}
 
-	emptyList := func(_ context.Context, _ string, _ string) ([]byte, int, error) {
+	emptyList := func(_ context.Context, _ string, _ string, _ string) ([]byte, int, error) {
 		return []byte(`{"data":[]}`), http.StatusOK, nil
 	}
-	if _, errList := CompatCatalogModelList(context.Background(), "https://ollama.com/v1", "k", emptyList); errList == nil {
+	if _, errList := CompatCatalogModelList(context.Background(), "https://ollama.com/v1", "k", "", emptyList); errList == nil {
 		t.Fatal("expected an error for an empty model list")
 	}
 
-	malformed := func(_ context.Context, _ string, _ string) ([]byte, int, error) {
+	malformed := func(_ context.Context, _ string, _ string, _ string) ([]byte, int, error) {
 		return []byte(`not json`), http.StatusOK, nil
 	}
-	if _, errList := CompatCatalogModelList(context.Background(), "https://ollama.com/v1", "k", malformed); errList == nil {
+	if _, errList := CompatCatalogModelList(context.Background(), "https://ollama.com/v1", "k", "", malformed); errList == nil {
 		t.Fatal("expected an error for a malformed model list")
 	}
 }
@@ -140,10 +140,10 @@ func TestCompatCatalogModelListRejectsBadResponses(t *testing.T) {
 func TestCompatCatalogModelListSkipsEntriesWithoutAnID(t *testing.T) {
 	t.Parallel()
 
-	fetcher := func(_ context.Context, _ string, _ string) ([]byte, int, error) {
+	fetcher := func(_ context.Context, _ string, _ string, _ string) ([]byte, int, error) {
 		return []byte(`{"data":[{"id":""},{"id":"  "},{"id":"good"}]}`), http.StatusOK, nil
 	}
-	models, errList := CompatCatalogModelList(context.Background(), "https://ollama.com/v1", "k", fetcher)
+	models, errList := CompatCatalogModelList(context.Background(), "https://ollama.com/v1", "k", "", fetcher)
 	if errList != nil {
 		t.Fatalf("CompatCatalogModelList: %v", errList)
 	}
@@ -279,10 +279,10 @@ func TestMergeCompatCatalogModelsDoesNotDuplicateAConfiguredModel(t *testing.T) 
 func TestCompatCatalogModelListNeverReturnsTheKeyInAModelName(t *testing.T) {
 	t.Parallel()
 
-	fetcher := func(_ context.Context, _ string, _ string) ([]byte, int, error) {
+	fetcher := func(_ context.Context, _ string, _ string, _ string) ([]byte, int, error) {
 		return []byte(`{"data":[{"id":"model-a"}]}`), http.StatusOK, nil
 	}
-	models, errList := CompatCatalogModelList(context.Background(), "https://ollama.com/v1", "super-secret", fetcher)
+	models, errList := CompatCatalogModelList(context.Background(), "https://ollama.com/v1", "super-secret", "", fetcher)
 	if errList != nil {
 		t.Fatalf("CompatCatalogModelList: %v", errList)
 	}
@@ -290,5 +290,45 @@ func TestCompatCatalogModelListNeverReturnsTheKeyInAModelName(t *testing.T) {
 		if strings.Contains(model.ID, "super-secret") || strings.Contains(model.DisplayName, "super-secret") {
 			t.Fatal("the model list carries the API key")
 		}
+	}
+}
+
+func TestMergeCompatCatalogModelsKeepsEveryConfiguredAlias(t *testing.T) {
+	t.Parallel()
+
+	// Two rows share an upstream name under different aliases. They are two
+	// published models, and deduplicating them would drop a pinned alias.
+	configured := []OpenAICompatibilityModel{
+		{Name: "m", Alias: "a"},
+		{Name: "m", Alias: "b"},
+	}
+	live := []CompatCatalogModel{{ID: "x"}, {ID: "y"}}
+
+	merged := MergeCompatCatalogModels(configured, live, nil)
+	if len(merged) != 4 {
+		t.Fatalf("merged len = %d, want 4: %+v", len(merged), merged)
+	}
+	if merged[0].Alias != "a" || merged[1].Alias != "b" {
+		t.Fatalf("a configured alias was dropped: %+v", merged)
+	}
+	if merged[2].Name != "x" || merged[3].Name != "y" {
+		t.Fatalf("the live models were not added: %+v", merged)
+	}
+}
+
+func TestMergeCompatCatalogModelsKeepsConfiguredRowsWhenOnlyLiveModelsAreKnown(t *testing.T) {
+	t.Parallel()
+
+	// A live model that is already configured must not create a second row, and
+	// the configured row must survive.
+	configured := []OpenAICompatibilityModel{{Name: "m", Alias: "a"}}
+	live := []CompatCatalogModel{{ID: "m"}}
+
+	merged := MergeCompatCatalogModels(configured, live, nil)
+	if len(merged) != 1 {
+		t.Fatalf("merged len = %d, want 1: %+v", len(merged), merged)
+	}
+	if merged[0].Alias != "a" {
+		t.Fatalf("the configured alias changed: %+v", merged[0])
 	}
 }

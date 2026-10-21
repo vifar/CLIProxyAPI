@@ -8,7 +8,8 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
 )
 
 // CompatCatalogProvider describes a provider whose live model list the proxy can
@@ -77,12 +78,33 @@ type compatCatalogModelsResponse struct {
 	} `json:"data"`
 }
 
-// CompatCatalogFetcher reads a provider's live model list.
-type CompatCatalogFetcher func(ctx context.Context, endpoint, apiKey string) ([]byte, int, error)
+// CompatCatalogTransport builds the transport for a live model list request,
+// honouring the credential's proxy. A nil transport means the default transport is
+// used.
+func CompatCatalogTransport(proxyURL string) (*http.Transport, error) {
+	trimmed := strings.TrimSpace(proxyURL)
+	if trimmed == "" {
+		return nil, nil
+	}
+	transport, _, errBuild := proxyutil.BuildHTTPTransport(trimmed)
+	if errBuild != nil {
+		return nil, errBuild
+	}
+	return transport, nil
+}
+
+// CompatCatalogFetcher reads a provider's live model list. The proxy URL is the
+// one the credential's own requests use, so a provider reachable only through its
+// configured proxy can be discovered too.
+type CompatCatalogFetcher func(ctx context.Context, endpoint, apiKey, proxyURL string) ([]byte, int, error)
 
 // compatCatalogHTTPFetcher performs the live model list request. Redirects are not
 // followed, so a redirect cannot move the key to another origin.
-func compatCatalogHTTPFetcher(ctx context.Context, endpoint, apiKey string) ([]byte, int, error) {
+//
+// The request carries no whole-request timeout: the repository's rule is that a
+// timeout may only bound credential acquisition, never the network behavior after
+// a connection is established. The request context still cancels the read.
+func compatCatalogHTTPFetcher(ctx context.Context, endpoint, apiKey, proxyURL string) ([]byte, int, error) {
 	request, errNew := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if errNew != nil {
 		return nil, 0, errNew
@@ -92,11 +114,20 @@ func compatCatalogHTTPFetcher(ctx context.Context, endpoint, apiKey string) ([]b
 	}
 	request.Header.Set("Accept", "application/json")
 
+	transport, errTransport := CompatCatalogTransport(proxyURL)
+	if errTransport != nil {
+		return nil, 0, errTransport
+	}
 	client := &http.Client{
-		Timeout: 15 * time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
+	}
+	if transport != nil {
+		client.Transport = transport
+		// The transport belongs to this request, so its idle connections are closed
+		// when the request is done.
+		defer transport.CloseIdleConnections()
 	}
 	response, errDo := client.Do(request)
 	if errDo != nil {
@@ -120,6 +151,7 @@ func CompatCatalogModelList(
 	ctx context.Context,
 	baseURL string,
 	apiKey string,
+	proxyURL string,
 	fetcher CompatCatalogFetcher,
 ) ([]CompatCatalogModel, error) {
 	provider := CompatCatalogProviderFor(baseURL)
@@ -134,7 +166,7 @@ func CompatCatalogModelList(
 		return nil, fmt.Errorf("provider requires an API key for the live model list")
 	}
 	endpoint := "https://" + provider.Host + provider.Path
-	body, status, errFetch := fetcher(ctx, endpoint, key)
+	body, status, errFetch := fetcher(ctx, endpoint, key, proxyURL)
 	if errFetch != nil {
 		return nil, errFetch
 	}
@@ -180,6 +212,11 @@ func CompatCatalogModelList(
 // operator excluded, so a model removed through `excluded-models` does not come back
 // from the provider.
 //
+// The configured rows are kept exactly as written, including several rows that share
+// an upstream name under different aliases: those are separate published models and
+// deduplicating them would drop a pinned alias. The known names are used only to
+// suppress a duplicate live addition.
+//
 // The merge is deterministic: the configured models keep their order, and the added
 // live models follow in the order the provider reported them.
 func MergeCompatCatalogModels(configured []OpenAICompatibilityModel, live []CompatCatalogModel, excluded []string) []OpenAICompatibilityModel {
@@ -189,6 +226,7 @@ func MergeCompatCatalogModels(configured []OpenAICompatibilityModel, live []Comp
 	merged := make([]OpenAICompatibilityModel, 0, len(configured)+len(live))
 	known := make(map[string]struct{}, len(configured))
 	for _, model := range configured {
+		merged = append(merged, model)
 		key := compatCatalogModelKey(model)
 		if key == "" {
 			continue
@@ -197,7 +235,6 @@ func MergeCompatCatalogModels(configured []OpenAICompatibilityModel, live []Comp
 			continue
 		}
 		known[key] = struct{}{}
-		merged = append(merged, model)
 	}
 	for _, candidate := range live {
 		id := strings.TrimSpace(candidate.ID)

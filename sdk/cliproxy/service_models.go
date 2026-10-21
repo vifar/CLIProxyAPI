@@ -850,6 +850,15 @@ func buildConfiguredModelInfo(model modelEntry, ownedBy, modelType string, creat
 	return info
 }
 
+// compatCatalogUpstreamName returns the upstream model name of a configured model.
+// The name is what the upstream serves; the alias is what the client asks for.
+func compatCatalogUpstreamName(model config.OpenAICompatibilityModel) string {
+	if name := strings.TrimSpace(model.Name); name != "" {
+		return name
+	}
+	return strings.TrimSpace(model.Alias)
+}
+
 func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []*ModelInfo {
 	if compat == nil || len(compat.Models) == 0 {
 		return nil
@@ -858,6 +867,12 @@ func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []
 	models := make([]*ModelInfo, 0, len(compat.Models))
 	for i := range compat.Models {
 		model := compat.Models[i]
+		// The exclusion is matched against the upstream model name, not the public
+		// alias: an alias can be anything, and the excluded model must not stay
+		// routable under a different name.
+		if config.CompatCatalogModelExcluded(compatCatalogUpstreamName(model), compat.ExcludedModels) {
+			continue
+		}
 		modelType := "openai-compatibility"
 		if model.Image {
 			modelType = registry.OpenAIImageModelType
