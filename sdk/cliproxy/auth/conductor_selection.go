@@ -2314,6 +2314,20 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 	opts.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey] = "mixed"
 	opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = model
 
+	selected, executor, providerKey, errPick := m.pickNextMixedSelected(ctx, providers, model, opts, tried)
+	if errPick != nil {
+		// The transition is recorded once, at this shared boundary, so every
+		// routing path that cannot serve the request is counted the same way.
+		recordRoutingTransition(ctx, RoutingTransitionEvent{
+			Transition: RoutingTransitionNoEligibleProvider,
+			Model:      model,
+		})
+	}
+	return selected, executor, providerKey, errPick
+}
+
+// pickNextMixedSelected selects a credential for a mixed-provider route.
+func (m *Manager) pickNextMixedSelected(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
 	if m.hasPluginScheduler() || !m.useSchedulerFastPath() {
 		return m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
 	}
@@ -2372,17 +2386,9 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 	}
 	if errPick != nil {
 		m.warnLogAuthUnavailable(ctx, eligibleProviders, model, opts, tried, errPick)
-		recordRoutingTransition(ctx, RoutingTransitionEvent{
-			Transition: RoutingTransitionNoEligibleProvider,
-			Model:      model,
-		})
 		return nil, nil, "", errPick
 	}
 	if selected == nil {
-		recordRoutingTransition(ctx, RoutingTransitionEvent{
-			Transition: RoutingTransitionNoEligibleProvider,
-			Model:      model,
-		})
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "selector returned no auth"}
 	}
 	executor, okExecutor := m.Executor(providerKey)

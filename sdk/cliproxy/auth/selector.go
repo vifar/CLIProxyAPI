@@ -1291,6 +1291,12 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 						} else {
 							entry.Infof("session-affinity: fallback cache hit | session=%s fallback=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
 						}
+						recordRoutingTransition(ctx, RoutingTransitionEvent{
+							Transition: RoutingTransitionBindingHit,
+							Model:      model,
+							Provider:   s.routingProviderKey(auth),
+							Session:    primaryID,
+						})
 						return auth, nil
 					}
 				}
@@ -1469,6 +1475,12 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 				}
 				entry.Infof("session-affinity: LCP cache hit | session=%s prefix=%d auth=%s provider=%s model=%s", truncateSessionID(match.SessionID), match.PrefixLength, auth.ID, provider, model)
 			}
+			recordRoutingTransition(ctx, RoutingTransitionEvent{
+				Transition: RoutingTransitionBindingHit,
+				Model:      model,
+				Provider:   s.routingProviderKey(auth),
+				Session:    match.SessionID,
+			})
 			return auth, true, nil
 		}
 		if !match.IsFork && s.shouldPreserveBindingWhenUnavailable(ctx, availabilityCandidates, model, match.AuthID, now) {
@@ -1534,6 +1546,12 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 			}
 			entry.Infof("session-affinity: LCP cache miss, new binding | session=%s auth=%s provider=%s model=%s", truncateSessionID(bindRes.SessionID), auth.ID, provider, model)
 		}
+		recordRoutingTransition(ctx, RoutingTransitionEvent{
+			Transition: RoutingTransitionBindingCreated,
+			Model:      model,
+			Provider:   s.routingProviderKey(auth),
+			Session:    bindRes.SessionID,
+		})
 	}
 	return auth, true, nil
 }

@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -101,26 +102,6 @@ func TestRoutingTransitionRecorderTruncatesTheSessionIdentifier(t *testing.T) {
 	}
 	if len(events[0].Session) >= 64 {
 		t.Fatalf("session was not truncated: %q", events[0].Session)
-	}
-}
-
-func TestRoutingTransitionRecorderNotifiesListeners(t *testing.T) {
-	t.Parallel()
-
-	recorder := NewRoutingTransitionRecorder(10)
-	seen := make(chan RoutingTransitionEvent, 1)
-	recorder.AddListener(func(event RoutingTransitionEvent) {
-		seen <- event
-	})
-	recorder.Record(RoutingTransitionEvent{Transition: RoutingTransitionBindingHit, Model: "model-a"})
-
-	select {
-	case event := <-seen:
-		if event.Transition != RoutingTransitionBindingHit {
-			t.Fatalf("event = %+v", event)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("the listener was not notified")
 	}
 }
 
@@ -277,5 +258,69 @@ func TestRoutingTransitionRecordsProviderFailover(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("no provider failover event: %+v", events)
+	}
+}
+
+// TestRoutingTransitionRecorderBoundsTheCounterCardinality asserts that the
+// counter map cannot grow without limit.
+//
+// A client can vary the spelling of a model it asks for, so the distinct model
+// and provider names are capped and the overflow is folded into a bounded bucket.
+// The aggregate totals must stay exact.
+func TestRoutingTransitionRecorderBoundsTheCounterCardinality(t *testing.T) {
+	t.Parallel()
+
+	recorder := NewRoutingTransitionRecorder(10)
+	limit := maxRoutingTransitionModels
+	for i := 0; i < limit*2; i++ {
+		recorder.Record(RoutingTransitionEvent{
+			Transition: RoutingTransitionNoEligibleProvider,
+			Model:      "model-" + strconv.Itoa(i),
+		})
+	}
+
+	counters := recorder.RoutingTransitionCounters()
+	if len(counters) > limit+1 {
+		t.Fatalf("counters len = %d, want at most %d plus the overflow bucket", len(counters), limit)
+	}
+
+	// The totals must be exact: every recorded transition is counted.
+	totals := recorder.RoutingTransitionTotals()
+	if totals[string(RoutingTransitionNoEligibleProvider)] != uint64(limit*2) {
+		t.Fatalf("total = %d, want %d", totals[string(RoutingTransitionNoEligibleProvider)], limit*2)
+	}
+}
+
+// TestRoutingTransitionRecordsNoEligibleProviderOnTheAffinityPath asserts that a
+// mixed request with session affinity that cannot be served is counted.
+//
+// The session-affinity selector is not a built-in selector, so an affinity request
+// enters the legacy mixed path. The transition has to be recorded there too, or
+// the counter would only see the fast path.
+func TestRoutingTransitionRecordsNoEligibleProviderOnTheAffinityPath(t *testing.T) {
+	t.Parallel()
+
+	recorder := NewRoutingTransitionRecorder(10)
+	previous := GetRoutingTransitionRecorder()
+	SetRoutingTransitionRecorder(recorder)
+	t.Cleanup(func() { SetRoutingTransitionRecorder(previous) })
+
+	manager := NewManager(nil, nil, nil)
+	affinity := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Hour,
+	})
+	t.Cleanup(affinity.Stop)
+	manager.SetSelector(affinity)
+
+	// No credential is registered, so the request cannot be routed.
+	_, _, _, errPick := manager.pickNextMixed(context.Background(), []string{"rt-provider-a"}, "rt-model", cliproxyexecutor.Options{}, nil)
+	if errPick == nil {
+		t.Fatal("expected the request to fail with no eligible credential")
+	}
+
+	totals := recorder.RoutingTransitionTotals()
+	if totals[string(RoutingTransitionNoEligibleProvider)] != 1 {
+		t.Fatalf("no eligible provider = %d, want 1: %+v", totals[string(RoutingTransitionNoEligibleProvider)], totals)
 	}
 }

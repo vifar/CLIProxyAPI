@@ -28,9 +28,11 @@ func (h *Handler) GetRoutingTransitions(c *gin.Context) {
 		})
 		return
 	}
+	// One snapshot, so the totals always agree with the sum of the counters.
+	snapshot := recorder.Snapshot()
 	c.JSON(http.StatusOK, gin.H{
-		"counters": recorder.RoutingTransitionCounters(),
-		"totals":   recorder.RoutingTransitionTotals(),
-		"events":   recorder.RoutingTransitionEvents(),
+		"counters": snapshot.Counters,
+		"totals":   snapshot.Totals,
+		"events":   snapshot.Events,
 	})
 }

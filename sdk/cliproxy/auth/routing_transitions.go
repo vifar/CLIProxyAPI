@@ -73,20 +73,31 @@ const maxRoutingTransitionProviders = 64
 // name, so a hostile client cannot make the key map large.
 const maxRoutingTransitionKeyLength = 128
 
+// routingTransitionOverflowName is the bucket a model or provider name beyond the
+// cardinality limit is counted under. The aggregate totals stay exact, because
+// every overflowed name still increments this bucket.
+const routingTransitionOverflowName = "<overflow>"
+
 // RoutingTransitionRecorder records routing transitions and counts them.
 //
 // The recorder is safe for concurrent use.
+//
+// The counter map is bounded. A client can vary the spelling of a model it asks
+// for, so the distinct model and provider names are capped and the overflow is
+// folded into a bounded bucket per transition. The aggregate totals stay exact.
 type RoutingTransitionRecorder struct {
 	// mu protects counters.
 	mu sync.Mutex
 	// counters holds the count per transition key.
 	counters map[routingTransitionKey]uint64
+	// knownModels holds the counted model names, up to the model limit.
+	knownModels map[string]struct{}
+	// knownProviders holds the counted provider names, up to the provider limit.
+	knownProviders map[string]struct{}
 	// events holds the most recent events, bounded.
 	events []RoutingTransitionEvent
 	// maxEvents bounds the retained event list.
 	maxEvents int
-	// listeners receive each event as it is recorded.
-	listeners []func(RoutingTransitionEvent)
 }
 
 // NewRoutingTransitionRecorder creates a recorder that retains the given number of
@@ -102,18 +113,6 @@ func NewRoutingTransitionRecorder(maxEvents int) *RoutingTransitionRecorder {
 	}
 }
 
-// AddListener registers a listener that receives every recorded event.
-//
-// A listener must not block: it runs on the routing path.
-func (r *RoutingTransitionRecorder) AddListener(listener func(RoutingTransitionEvent)) {
-	if r == nil || listener == nil {
-		return
-	}
-	r.mu.Lock()
-	r.listeners = append(r.listeners, listener)
-	r.mu.Unlock()
-}
-
 // Record records one routing transition and increments its counter.
 func (r *RoutingTransitionRecorder) Record(event RoutingTransitionEvent) {
 	if r == nil {
@@ -125,10 +124,23 @@ func (r *RoutingTransitionRecorder) Record(event RoutingTransitionEvent) {
 	event.Session = truncateSessionID(event.Session)
 
 	r.mu.Lock()
+	if r.knownModels == nil {
+		r.knownModels = make(map[string]struct{})
+	}
+	if r.knownProviders == nil {
+		r.knownProviders = make(map[string]struct{})
+	}
+	// The model and provider names are bounded, so a client cannot make the
+	// counter map grow without limit by varying the spelling of a model. A name
+	// beyond the limit is counted in a bounded overflow bucket, so the aggregate
+	// totals stay exact.
+	model := r.boundedName(r.knownModels, event.Model, maxRoutingTransitionModels)
+	provider := r.boundedName(r.knownProviders, event.Provider, maxRoutingTransitionProviders)
+
 	key := routingTransitionKey{
 		transition: event.Transition,
-		model:      event.Model,
-		provider:   event.Provider,
+		model:      model,
+		provider:   provider,
 	}
 	r.counters[key]++
 	if len(r.events) >= r.maxEvents {
@@ -137,13 +149,73 @@ func (r *RoutingTransitionRecorder) Record(event RoutingTransitionEvent) {
 		r.events = r.events[:len(r.events)-1]
 	}
 	r.events = append(r.events, event)
-	listeners := make([]func(RoutingTransitionEvent), len(r.listeners))
-	copy(listeners, r.listeners)
 	r.mu.Unlock()
+}
 
-	for _, listener := range listeners {
-		listener(event)
+// boundedName returns the name to count under, folding a name beyond the limit
+// into the overflow bucket.
+//
+// The caller holds the recorder lock.
+func (r *RoutingTransitionRecorder) boundedName(known map[string]struct{}, name string, limit int) string {
+	if name == "" {
+		return ""
 	}
+	if _, ok := known[name]; ok {
+		return name
+	}
+	if len(known) < limit {
+		known[name] = struct{}{}
+		return name
+	}
+	// The name is beyond the limit, so it is counted in the overflow bucket.
+	return routingTransitionOverflowName
+}
+
+// RoutingTransitionSnapshot is one consistent view of the recorded transitions.
+//
+// The counters, the totals and the events are read under one lock, so a binding
+// that arrives between two reads cannot make the totals disagree with the sum of
+// the counters, and the events cannot describe a later state.
+type RoutingTransitionSnapshot struct {
+	// Counters are the per-transition, model and provider counts.
+	Counters []RoutingTransitionCounter
+	// Totals are the total count per transition.
+	Totals map[string]uint64
+	// Events are the most recent events, newest last.
+	Events []RoutingTransitionEvent
+}
+
+// Snapshot returns one consistent view of the recorded transitions.
+func (r *RoutingTransitionRecorder) Snapshot() RoutingTransitionSnapshot {
+	if r == nil {
+		return RoutingTransitionSnapshot{}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	counters := make([]RoutingTransitionCounter, 0, len(r.counters))
+	totals := make(map[string]uint64, len(RoutingTransitionValues()))
+	for key, count := range r.counters {
+		counters = append(counters, RoutingTransitionCounter{
+			Transition: string(key.transition),
+			Model:      key.model,
+			Provider:   key.provider,
+			Count:      count,
+		})
+		totals[string(key.transition)] += count
+	}
+	sort.Slice(counters, func(i, j int) bool {
+		if counters[i].Transition != counters[j].Transition {
+			return counters[i].Transition < counters[j].Transition
+		}
+		if counters[i].Model != counters[j].Model {
+			return counters[i].Model < counters[j].Model
+		}
+		return counters[i].Provider < counters[j].Provider
+	})
+	events := make([]RoutingTransitionEvent, len(r.events))
+	copy(events, r.events)
+	return RoutingTransitionSnapshot{Counters: counters, Totals: totals, Events: events}
 }
 
 // RoutingTransitionCounters returns the counters as a flat list, sorted for a
@@ -152,27 +224,7 @@ func (r *RoutingTransitionRecorder) RoutingTransitionCounters() []RoutingTransit
 	if r == nil {
 		return nil
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	out := make([]RoutingTransitionCounter, 0, len(r.counters))
-	for key, count := range r.counters {
-		out = append(out, RoutingTransitionCounter{
-			Transition: string(key.transition),
-			Model:      key.model,
-			Provider:   key.provider,
-			Count:      count,
-		})
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Transition != out[j].Transition {
-			return out[i].Transition < out[j].Transition
-		}
-		if out[i].Model != out[j].Model {
-			return out[i].Model < out[j].Model
-		}
-		return out[i].Provider < out[j].Provider
-	})
-	return out
+	return r.Snapshot().Counters
 }
 
 // RoutingTransitionCounter is one counted routing transition.
@@ -204,13 +256,7 @@ func (r *RoutingTransitionRecorder) RoutingTransitionTotals() map[string]uint64 
 	if r == nil {
 		return nil
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	totals := make(map[string]uint64, len(RoutingTransitionValues()))
-	for key, count := range r.counters {
-		totals[string(key.transition)] += count
-	}
-	return totals
+	return r.Snapshot().Totals
 }
 
 // RoutingTransitionValues returns every known transition.
