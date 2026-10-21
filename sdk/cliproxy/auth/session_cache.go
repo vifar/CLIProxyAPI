@@ -342,6 +342,19 @@ func (c *SessionCache) CompareAndDelete(sessionID, expectedAuthID string) bool {
 // a window in which another request can select and bind a different credential,
 // and the attribution would then describe a binding that no longer exists.
 func (c *SessionCache) CompareAndDeleteReturning(sessionID, expectedAuthID string) (string, bool) {
+	return c.CompareAndDeleteReporting(sessionID, expectedAuthID, nil)
+}
+
+// CompareAndDeleteReporting removes a binding only if it still points at the
+// expected credential, and calls report with the credential it removed.
+//
+// The report is called while the cache lock is held, so the removal and the
+// attribution it publishes are one step. A concurrent selection cannot observe
+// the removal and bind a different credential in between, which would leave the
+// attribution describing a binding that no longer exists.
+//
+// The callback must not call back into the cache.
+func (c *SessionCache) CompareAndDeleteReporting(sessionID, expectedAuthID string, report func(removedAuthID string)) (string, bool) {
 	if c == nil || sessionID == "" || expectedAuthID == "" {
 		return "", false
 	}
@@ -353,6 +366,9 @@ func (c *SessionCache) CompareAndDeleteReturning(sessionID, expectedAuthID strin
 		return "", false
 	}
 	removed := entry.authID
+	if report != nil {
+		report(removed)
+	}
 	c.removeAliasGroupLocked(entry)
 
 	surviving := make([]string, 0, len(entry.aliases))

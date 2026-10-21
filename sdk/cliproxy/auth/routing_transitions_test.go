@@ -585,77 +585,84 @@ func TestSessionAffinityConsumesTheAliasFailureWithThePrimary(t *testing.T) {
 	}
 }
 
-// TestSessionAffinityFailureRecordSurvivesAPrimaryChange asserts that a failed
-// binding's record is found when the request carries a different primary
-// identifier for the same binding.
+// TestSessionAffinityFailureAttributionSurvivesAPrimaryChange asserts that a
+// replacement through a changed primary identifier is attributed to the provider
+// whose credential failed, and that the attribution is consumed once.
 //
-// The alias is the identifier that does not change, so the record is keyed by
-// it. A record left under only the primary identifier would survive a change of
-// the primary and be picked up later by an unrelated replacement, which would
-// then be reported against the wrong provider.
-func TestSessionAffinityFailureRecordSurvivesAPrimaryChange(t *testing.T) {
+// The test drives the real path: a failure is reported through OnResult, the
+// session is rebound through a different primary identifier for the same
+// conversation, and a later replacement must be attributed to the current
+// provider rather than to the original failed one.
+func TestSessionAffinityFailureAttributionSurvivesAPrimaryChange(t *testing.T) {
 	t.Parallel()
 
-	affinity := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
-		Fallback: &RoundRobinSelector{},
-		TTL:      time.Hour,
+	recorder := NewRoutingTransitionRecorder(10)
+	selector, _, providerA, model := routingTransitionTestSelector(t, recorder)
+
+	// The conversation is bound to the first credential. The body carries a
+	// prompt cache key and a conversation identifier, so the primary identifier
+	// is the prompt cache key and the alias is the conversation.
+	body := func(promptCacheKey string) []byte {
+		return []byte(`{"prompt_cache_key":"` + promptCacheKey + `","conversation":{"id":"rt-conv-1"},"messages":[{"role":"user","content":"hello"}]}`)
+	}
+	opts := func(promptCacheKey string) cliproxyexecutor.Options {
+		return cliproxyexecutor.Options{
+			Headers:         http.Header{"Content-Type": []string{"application/json"}},
+			OriginalRequest: body(promptCacheKey),
+			Metadata: map[string]any{
+				cliproxyexecutor.SessionAffinityProviderMetadataKey: "mixed",
+				cliproxyexecutor.SessionAffinityModelMetadataKey:    model,
+			},
+		}
+	}
+
+	primaryOpts := opts("rt-pck-1")
+	first := []*Auth{{ID: "rt-auth-a", Provider: providerA}}
+	if _, errPick := selector.Pick(context.Background(), "mixed", model, primaryOpts, first); errPick != nil {
+		t.Fatalf("first Pick: %v", errPick)
+	}
+
+	// The bound credential fails, and the result handling removes the binding.
+	selector.OnResult(Result{
+		AuthID:   "rt-auth-a",
+		Provider: "mixed",
+		Model:    model,
+		Success:  false,
+		Error:    &Error{Code: ErrorCodeForceCooldown, Message: "unavailable"},
+		Options:  primaryOpts,
 	})
-	t.Cleanup(affinity.Stop)
 
-	const primaryKey = "mixed::p1::model-1"
-	const aliasKey = "mixed::c1::model-1"
-
-	// The binding fails, and the record is stored under both identifiers.
-	affinity.rememberFailedBindingForBinding(primaryKey, aliasKey, "provider-a")
-
-	// The retry arrives with a different primary identifier and the same alias.
-	if got := affinity.takeFailedBindingForBinding("mixed::p2::model-1", aliasKey); got != "provider-a" {
-		t.Fatalf("failed provider = %q, want provider-a", got)
+	// The conversation is retried with a different prompt cache key and the same
+	// conversation, and only another provider is eligible.
+	changedOpts := opts("rt-pck-2")
+	second := []*Auth{{ID: "rt-auth-b", Provider: "rt-provider-b"}}
+	if _, errPick := selector.Pick(context.Background(), "mixed", model, changedOpts, second); errPick != nil {
+		t.Fatalf("second Pick: %v", errPick)
 	}
 
-	// The primary's record was never stored, so it cannot survive under the
-	// other identifier.
-	if got := affinity.takeFailedBinding(primaryKey); got != "" {
-		t.Fatalf("failed provider = %q, want no record under the primary", got)
+	totals := recorder.Snapshot().Totals
+	if totals[string(RoutingTransitionProviderFailover)] != 1 {
+		t.Fatalf("provider failover = %d, want 1: %+v", totals[string(RoutingTransitionProviderFailover)], totals)
 	}
-}
 
-// TestSessionAffinityFailureRecordIsKeyedByTheAlias asserts that the alias
-// leads the record's identifiers.
-//
-// The primary identifier can change between two requests for the same
-// conversation, while the alias does not, so the alias has to be the identifier
-// the record is found by.
-func TestSessionAffinityFailureRecordIsKeyedByTheAlias(t *testing.T) {
-	t.Parallel()
-
-	affinity := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
-		Fallback: &RoundRobinSelector{},
-		TTL:      time.Hour,
+	// The attribution is consumed once. A later replacement is attributed to the
+	// provider it actually failed on, not to the original failed provider.
+	selector.OnResult(Result{
+		AuthID:   "rt-auth-b",
+		Provider: "mixed",
+		Model:    model,
+		Success:  false,
+		Error:    &Error{Code: ErrorCodeForceCooldown, Message: "unavailable"},
+		Options:  changedOpts,
 	})
-	t.Cleanup(affinity.Stop)
-
-	const primaryKey = "mixed::p1::model-1"
-	const aliasKey = "mixed::c1::model-1"
-
-	affinity.rememberFailedBindingForBinding(primaryKey, aliasKey, "provider-a")
-
-	// The record is found by the alias, and only by the alias: the primary
-	// identifier can change, so a record under it would not be the same
-	// binding's record.
-	if got := affinity.takeFailedBinding(aliasKey); got != "provider-a" {
-		t.Fatalf("failed provider = %q, want provider-a", got)
+	thirdOpts := opts("rt-pck-3")
+	third := []*Auth{{ID: "rt-auth-c", Provider: "rt-provider-c"}}
+	if _, errPick := selector.Pick(context.Background(), "mixed", model, thirdOpts, third); errPick != nil {
+		t.Fatalf("third Pick: %v", errPick)
 	}
-	if got := affinity.takeFailedBinding(primaryKey); got != "" {
-		t.Fatalf("failed provider = %q, want no record under the primary", got)
-	}
-	// And it is consumed as a whole, so nothing survives under the other
-	// identifier.
-	affinity.rememberFailedBindingForBinding(primaryKey, aliasKey, "provider-a")
-	if got := affinity.takeFailedBindingForBinding(primaryKey, aliasKey); got != "provider-a" {
-		t.Fatalf("failed provider = %q, want provider-a", got)
-	}
-	if got := affinity.takeFailedBinding(primaryKey); got != "" {
-		t.Fatalf("failed provider = %q, want the record to be cleared", got)
+
+	totals = recorder.Snapshot().Totals
+	if totals[string(RoutingTransitionProviderFailover)] != 2 {
+		t.Fatalf("provider failover = %d, want 2: %+v", totals[string(RoutingTransitionProviderFailover)], totals)
 	}
 }
