@@ -466,3 +466,47 @@ func TestSessionAffinityRemembersTheProviderOfEveryBinding(t *testing.T) {
 		t.Fatal("the remembered provider must be the bound one")
 	}
 }
+
+// TestRoutingTransitionRecordsAnAliasReplacement asserts that a replacement
+// through a live alias is reported as a replacement, not as a created binding.
+//
+// A request that introduces a new alias can find the conversation's binding
+// under the alias while the primary key holds nothing. The binding is then
+// replaced, and the transition must say so.
+func TestRoutingTransitionRecordsAnAliasReplacement(t *testing.T) {
+	t.Parallel()
+
+	recorder := NewRoutingTransitionRecorder(10)
+	selector, _, _, model := routingTransitionTestSelector(t, recorder)
+
+	// The conversation is bound to the first credential. The body carries a
+	// prompt cache key and a conversation identifier, so the primary key is the
+	// prompt cache key and the alias is the conversation.
+	body := []byte(`{"prompt_cache_key":"rt-alias-1","conversation":{"id":"rt-conv-1"},"messages":[{"role":"user","content":"hello"}]}`)
+	opts := cliproxyexecutor.Options{
+		Headers:         http.Header{"Content-Type": []string{"application/json"}},
+		OriginalRequest: body,
+	}
+	first := []*Auth{{ID: "rt-auth-a", Provider: "rt-provider-a"}}
+	if _, errPick := selector.Pick(context.Background(), "mixed", model, opts, first); errPick != nil {
+		t.Fatalf("first Pick: %v", errPick)
+	}
+
+	// The next request introduces a different prompt cache key for the same
+	// conversation. The alias still points at the first credential, which is no
+	// longer available, and only another provider is eligible.
+	secondBody := []byte(`{"prompt_cache_key":"rt-alias-2","conversation":{"id":"rt-conv-1"},"messages":[{"role":"user","content":"hello"}]}`)
+	secondOpts := cliproxyexecutor.Options{
+		Headers:         http.Header{"Content-Type": []string{"application/json"}},
+		OriginalRequest: secondBody,
+	}
+	second := []*Auth{{ID: "rt-auth-b", Provider: "rt-provider-b"}}
+	if _, errPick := selector.Pick(context.Background(), "mixed", model, secondOpts, second); errPick != nil {
+		t.Fatalf("second Pick: %v", errPick)
+	}
+
+	totals := recorder.Snapshot().Totals
+	if totals[string(RoutingTransitionProviderFailover)] != 1 {
+		t.Fatalf("provider failover = %d, want 1: %+v", totals[string(RoutingTransitionProviderFailover)], totals)
+	}
+}

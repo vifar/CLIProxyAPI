@@ -1282,6 +1282,10 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 			s.rememberBoundProvider(authID, providerKey)
 		}
 	}
+	// The provider an existing binding pointed at is captured before the binding
+	// is written, because writing the binding replaces the alias and removes the
+	// old entry.
+	replacedAliasAuthID, replacedAliasProvider := s.replacedAliasProvider(cacheKey, fallbackKey, availabilityCandidates)
 
 	if cachedAuthID, ok := s.cache.GetAndRefresh(cacheKey); ok {
 		for _, auth := range available {
@@ -1398,6 +1402,22 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 			transition = RoutingTransitionProviderFailover
 		}
 		previousProvider = failedProvider
+	} else {
+		// The binding may have existed without a recorded failure: a live alias
+		// that pointed at a credential which is no longer available. The
+		// provider it pointed at was captured before the binding was written, so
+		// the replacement is reported as the replacement it is rather than as a
+		// new binding.
+		//
+		// An existing binding that points at the credential being bound is not a
+		// replacement: the session stays with the credential it had.
+		if replacedAliasAuthID != "" && replacedAliasAuthID != auth.ID {
+			transition = RoutingTransitionCredentialReselected
+			previousProvider = replacedAliasProvider
+			if newProvider != "" && newProvider != previousProvider {
+				transition = RoutingTransitionProviderFailover
+			}
+		}
 	}
 	recordRoutingTransition(ctx, RoutingTransitionEvent{
 		Transition:       transition,
@@ -1407,6 +1427,31 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		Session:          primaryID,
 	})
 	return auth, nil
+}
+
+// replacedAliasProvider returns the credential an existing binding pointed at
+// and the provider it belonged to.
+//
+// The primary key and the fallback alias are both consulted, because a request
+// that introduces a new alias can find the conversation's binding under the
+// alias while the primary key holds nothing.
+//
+// It is called before the binding is written, because writing the binding
+// replaces the alias and removes the old entry.
+func (s *SessionAffinitySelector) replacedAliasProvider(cacheKey, fallbackKey string, candidates []*Auth) (string, string) {
+	for _, key := range []string{cacheKey, fallbackKey} {
+		if key == "" {
+			continue
+		}
+		authID, ok := s.cache.Get(key)
+		if !ok || authID == "" {
+			continue
+		}
+		if providerKey := s.boundProviderFor(authID, candidates); providerKey != "" {
+			return authID, providerKey
+		}
+	}
+	return "", ""
 }
 
 // routingProviderKey returns the provider key a selected auth belongs to.
@@ -1521,13 +1566,17 @@ func (s *SessionAffinitySelector) rememberFailedBinding(bindingKey, providerKey 
 
 // lcpFailedBindingKey is the key an LCP sequence's failure is recorded under.
 //
-// The namespace carries the provider and the model, and the session identifies
-// the conversation. The credential is not part of the key: the retry binds a
-// different credential, so a credential-keyed record would never be found. The
-// session is, so an unrelated conversation that happens to choose the same
-// credential cannot consume the record.
-func lcpFailedBindingKey(namespace, sessionID string) string {
-	return namespace + "\x00" + sessionID
+// The namespace carries the provider and the model, and the sequence identity
+// identifies the request sequence. The credential is not part of the key: the
+// retry binds a different credential, so a credential-keyed record would never
+// be found. The session identifier is not either: it is derived from the longest
+// prefix, so it changes as the conversation grows, and a fork's session
+// identifier is derived from a different prefix than its ancestor's. The
+// sequence identity is derived from the fingerprints, so it is the same for the
+// selection that binds the sequence and for the result handling that removes
+// it, and an unrelated conversation cannot consume the record.
+func lcpFailedBindingKey(namespace, sequenceIdentity string) string {
+	return namespace + "\x00" + sequenceIdentity
 }
 
 // takeFailedBinding returns and clears the provider recorded for a failed binding.
@@ -1752,8 +1801,10 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 			previousProvider = replacedProvider
 		default:
 			// The sequence may have been removed by a credential-attributed failure,
-			// in which case the retry is the replacement of that binding.
-			if failedProvider := s.takeFailedBinding(lcpFailedBindingKey(namespace, bindRes.SessionID)); failedProvider != "" {
+			// in which case the retry is the replacement of that binding. The
+			// sequence identity is derived from the fingerprints, so it is the
+			// same identity the removal recorded it under.
+			if failedProvider := s.takeFailedBinding(lcpFailedBindingKey(namespace, cliproxysession.SequenceIdentity(fingerprints))); failedProvider != "" {
 				transition = RoutingTransitionCredentialReselected
 				if newProvider != "" && newProvider != failedProvider {
 					transition = RoutingTransitionProviderFailover
@@ -2059,9 +2110,11 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 							generation = gen
 						}
 					}
-					// The session identifies the conversation, so the failure is
-					// recorded under it. The retry binds a different credential,
-					// so a credential-keyed record would never be found.
+					// The sequence identity is derived from the fingerprints, so it
+					// is the same for the selection that binds the sequence and
+					// for the removal here. The session identifier is not: it
+					// changes as the conversation grows.
+					sequenceIdentity := cliproxysession.SequenceIdentity(fingerprints)
 					lcpSessionID := ""
 					if res.Options.Metadata != nil {
 						lcpSessionID = sessionMetadataString(res.Options.Metadata, cliproxyexecutor.LCPAffinitySessionIDMetadataKey)
@@ -2077,9 +2130,9 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 							removed = s.matcher.RemoveSessionBefore(namespace, lcpSessionID, res.AuthID, generation)
 						}
 					}
-					if removed && lcpSessionID != "" {
+					if removed && sequenceIdentity != "" {
 						if providerKey := s.boundProviderFor(res.AuthID, nil); providerKey != "" {
-							s.rememberFailedBinding(lcpFailedBindingKey(namespace, lcpSessionID), providerKey)
+							s.rememberFailedBinding(lcpFailedBindingKey(namespace, sequenceIdentity), providerKey)
 						}
 					}
 				}

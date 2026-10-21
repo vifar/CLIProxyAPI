@@ -1723,6 +1723,17 @@ func sequenceKey(fingerprints []string) string {
 	return keys[len(keys)-1]
 }
 
+// SequenceIdentity returns a stable identifier for a request sequence.
+//
+// The identifier is derived from the sequence's fingerprints, so it is the same
+// for the selection that binds a sequence and for the result handling that
+// removes it. The session identifier is not: it is derived from the longest
+// prefix, so it changes as the conversation grows, and a fork's session
+// identifier is derived from a different prefix than its ancestor's.
+func SequenceIdentity(fingerprints []string) string {
+	return sequenceKey(fingerprints)
+}
+
 func newLCPSessionID(namespace, firstPrefix string) string {
 	sum := sha256.Sum256([]byte("cli-proxy-api:lcp-session:v1\x00" + namespace + "\x00" + firstPrefix))
 	return "lcp:v1:" + hex.EncodeToString(sum[:])
