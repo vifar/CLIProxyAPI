@@ -214,7 +214,8 @@ const codexWebsocketWriteChunkSize = 32 * 1024
 var (
 	testWebsocketWritePayloadHook func(conn *websocket.Conn)
 	testWebsocketWriteChunkHook   func(chunkIndex int, totalChunks int)
-	// testWebsocketWriteCompleteHook is called after a payload write has finished.
+	// testWebsocketWriteCompleteHook runs after an unchunked payload write
+	// returns, including on error; chunked writes do not call it.
 	// A test that holds a write open uses it to learn when the client is done,
 	// so the server does not close the connection while the write is in flight.
 	testWebsocketWriteCompleteHook func()

@@ -29,11 +29,8 @@ type SessionCache struct {
 	evictionElements map[string]*list.Element
 	maxEntries       int
 	ttl              time.Duration
-	// now returns the current time. It is a field so a test can control the
-	// clock, rather than sleeping and hoping the machine is not loaded.
-	//
-	// It is read by the cleanup goroutine and written by a test, so it is
-	// accessed atomically.
+	// now is replaced atomically because cache operations and background
+	// cleanup can read it concurrently with SetClock.
 	now      atomic.Pointer[func() time.Time]
 	stopCh   chan struct{}
 	stopOnce sync.Once
@@ -80,8 +77,10 @@ func NewSessionCacheWithCapacity(ttl time.Duration, maxEntries int) *SessionCach
 	return c
 }
 
-// SetClock replaces the cache's clock. It exists so a test can control time
-// instead of sleeping.
+// SetClock replaces the time source for expiration checks and TTL refreshes,
+// allowing tests to advance time without sleeping. It does not change existing
+// expiration timestamps or the background cleanup ticker. The clock function
+// must be safe for concurrent calls from cache operations and background cleanup.
 func (c *SessionCache) SetClock(clock func() time.Time) {
 	if c == nil || clock == nil {
 		return
