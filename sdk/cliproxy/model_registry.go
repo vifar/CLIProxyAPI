@@ -2,6 +2,7 @@ package cliproxy
 
 import (
 	"maps"
+	"strconv"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
@@ -56,13 +57,25 @@ type modelRegistrationFence struct {
 	globalExclusions          map[string]diff.ExcludedModelsSummary
 	exclusionProvider         string
 	fallbackExclusionProvider string
-	registryEpoch             uint64
-	registrationEpoch         uint64
-	prefix                    string
-	provider                  string
-	disabled                  bool
-	authKind                  string
-	attributes                map[string]string
+	// compatExclusions is the compatible provider's own excluded-models list, in
+	// the order the configuration holds it.
+	//
+	// The global OAuth exclusions are not the only exclusion that applies to a
+	// compatible provider: it carries its own list. A registration that captured
+	// one configuration must not publish under a later one, or an excluded
+	// model would be republished.
+	compatExclusions string
+	// compatAuth is the credential the fence was built for, so the compatible
+	// provider's own excluded-models list can be compared against the current
+	// configuration.
+	compatAuth        *coreauth.Auth
+	registryEpoch     uint64
+	registrationEpoch uint64
+	prefix            string
+	provider          string
+	disabled          bool
+	authKind          string
+	attributes        map[string]string
 }
 
 func newModelRegistrationFence(a *coreauth.Auth, cfg *config.Config) modelRegistrationFence {
@@ -77,12 +90,16 @@ func newModelRegistrationFence(a *coreauth.Auth, cfg *config.Config) modelRegist
 		return modelRegistrationFence{globalExclusions: exclusions}
 	}
 	provider := strings.ToLower(strings.TrimSpace(a.Provider))
+	compatExclusions := ""
 	if _, _, compat := openAICompatInfoFromAuth(a); compat {
 		provider = "openai-compatibility"
+		compatExclusions = compatExcludedModelsSummaryForConfig(cfg, a)
 	}
 	return modelRegistrationFence{
 		globalExclusions:  exclusions,
 		exclusionProvider: provider,
+		compatExclusions:  compatExclusions,
+		compatAuth:        a,
 		registryEpoch:     GlobalModelRegistry().ClientRegistrationEpoch(a.ID),
 		registrationEpoch: a.RegistrationEpoch,
 		prefix:            a.Prefix,
@@ -102,6 +119,7 @@ func (f modelRegistrationFence) withAuth(a *coreauth.Auth) modelRegistrationFenc
 	}
 	next := newModelRegistrationFence(a, nil)
 	next.globalExclusions = f.globalExclusions
+	next.compatAuth = f.compatAuth
 	next.fallbackExclusionProvider = f.fallbackExclusionProvider
 	next.registryEpoch = f.registryEpoch
 	return next
@@ -117,6 +135,64 @@ func (f modelRegistrationFence) publishUnregister(s *Service, authID string) boo
 	return f.publishIfCurrent(s, authID, func() bool {
 		return GlobalModelRegistry().UnregisterClientIfEpochCurrent(authID, f.registryEpoch, func() bool { return true })
 	})
+}
+
+// compatExcludedModelsSummaryForConfig returns the compatible provider's own
+// excluded-models list for a configuration.
+//
+// The list is identified by the provider entry the credential was synthesized
+// from, so a reload that moves the credential to another entry is detected.
+func compatExcludedModelsSummaryForConfig(cfg *config.Config, a *coreauth.Auth) string {
+	if cfg == nil || a == nil {
+		return ""
+	}
+	entry := resolveCompatConfigEntry(cfg, a)
+	if entry == nil {
+		return ""
+	}
+	parts := make([]string, 0, len(entry.ExcludedModels))
+	for _, item := range entry.ExcludedModels {
+		if trimmed := strings.TrimSpace(item); trimmed != "" {
+			parts = append(parts, strings.ToLower(trimmed))
+		}
+	}
+	return strings.Join(parts, ",")
+}
+
+// resolveCompatConfigEntry returns the compatible provider entry a credential
+// was synthesized from.
+//
+// The entry is found by the credential's position in the configuration, and by
+// its name when the position is not known. It matches how the registration path
+// resolves the entry, so both name the same entry.
+func resolveCompatConfigEntry(cfg *config.Config, a *coreauth.Auth) *config.OpenAICompatibility {
+	if cfg == nil || a == nil || len(cfg.OpenAICompatibility) == 0 {
+		return nil
+	}
+	if a.AuthSourceKind() == coreauth.AuthSourceConfig && a.Attributes != nil {
+		index, errIndex := strconv.Atoi(strings.TrimSpace(a.Attributes[coreauth.AttributeConfigIndex]))
+		if errIndex == nil && index >= 0 && index < len(cfg.OpenAICompatibility) {
+			entry := &cfg.OpenAICompatibility[index]
+			if !entry.Disabled {
+				return entry
+			}
+			return nil
+		}
+	}
+	compatName := strings.TrimSpace(a.Attributes["compat_name"])
+	if compatName == "" {
+		return nil
+	}
+	for index := range cfg.OpenAICompatibility {
+		entry := &cfg.OpenAICompatibility[index]
+		if entry.Disabled {
+			continue
+		}
+		if strings.EqualFold(entry.Name, compatName) {
+			return entry
+		}
+	}
+	return nil
 }
 
 func (f modelRegistrationFence) publishIfCurrent(s *Service, authID string, publish func() bool) bool {
@@ -136,6 +212,13 @@ func (f modelRegistrationFence) publishIfCurrent(s *Service, authID string, publ
 				if f.globalExclusions[provider] != diff.SummarizeExcludedModels(current) {
 					return false
 				}
+			}
+			// The compatible provider's own excluded-models list applies to it
+			// as well, and it is not part of the global OAuth exclusions. A
+			// registration that captured one configuration must not publish
+			// under a later one, or an excluded model would be republished.
+			if f.compatAuth != nil && f.compatExclusions != compatExcludedModelsSummaryForConfig(s.cfg, f.compatAuth) {
+				return false
 			}
 			// Hold cfgMu through registry publication, not just the comparison.
 		}

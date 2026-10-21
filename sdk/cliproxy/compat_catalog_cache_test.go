@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
 // TestCompatCatalogCacheIsDiscardedWhenTheLiveListsChange asserts that a
@@ -151,5 +152,47 @@ func TestCompatCatalogDiscoversAnUnnamedProvider(t *testing.T) {
 	merged := manager.modelsFor(0, compat, "")
 	if len(merged.Models) != 1 || merged.Models[0].Name != "unnamed-provider-model" {
 		t.Fatalf("merged models = %+v, want the discovered model", merged.Models)
+	}
+}
+
+// TestModelRegistrationFenceDetectsAProviderExclusionChange asserts that a
+// registration captured under one configuration does not publish under a later
+// one that excludes a different model.
+//
+// The compatible provider carries its own excluded-models list, which is not
+// part of the global OAuth exclusions. A registration that captured one
+// configuration must not publish under a later one, or an excluded model would
+// be republished.
+func TestModelRegistrationFenceDetectsAProviderExclusionChange(t *testing.T) {
+	t.Parallel()
+
+	auth := &coreauth.Auth{
+		ID:         "compat-fence-auth",
+		Provider:   "openai-compatibility",
+		Status:     coreauth.StatusActive,
+		Attributes: map[string]string{"compat_name": "ollama-cloud", "config_index": "0"},
+	}
+
+	cfg := &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{
+			{
+				Name:           "ollama-cloud",
+				BaseURL:        "https://ollama.com/v1",
+				ExcludedModels: []string{"excluded-model"},
+			},
+		},
+	}
+	fence := newModelRegistrationFence(auth, cfg)
+
+	// A reload that changes the provider's own exclusions is detected.
+	cfg.OpenAICompatibility[0].ExcludedModels = []string{"other-model"}
+	if fence.compatExclusions == compatExcludedModelsSummaryForConfig(cfg, auth) {
+		t.Fatal("the fence must not match a changed exclusion list")
+	}
+
+	// A reload that leaves it unchanged is not.
+	cfg.OpenAICompatibility[0].ExcludedModels = []string{"excluded-model"}
+	if fence.compatExclusions != compatExcludedModelsSummaryForConfig(cfg, auth) {
+		t.Fatal("the fence must match an unchanged exclusion list")
 	}
 }

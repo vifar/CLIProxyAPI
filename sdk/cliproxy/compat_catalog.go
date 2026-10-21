@@ -180,21 +180,19 @@ func (m *compatCatalogManager) Refresh(ctx context.Context) {
 			// repository rule is that a timeout may only bound credential
 			// acquisition, never the network behavior after a connection is
 			// established. The caller's context still cancels the pass.
-			m.refreshProvider(ctx, current)
+			changed := m.refreshProvider(ctx, current)
 			// Each provider publishes as soon as it has answered, so a provider
 			// that never completes its response cannot hold back the results the
 			// others returned, and it cannot stop the next pass either.
-			if ctx.Err() == nil {
+			//
+			// Only a changed list is published. An unchanged list is already
+			// published, and republishing it would rebuild the registry for
+			// every compatible credential on every pass.
+			if changed && ctx.Err() == nil {
 				m.publishLiveModels(ctx)
 			}
 		}(target)
 	}
-
-	// The publication runs on every refresh, not only when the upstream list
-	// changed. A file reload replaces the configuration with the provider's
-	// static models, so the discovered models have to be reconciled back even
-	// when the provider still reports the same list.
-	m.publishLiveModels(ctx)
 }
 
 // beginRead marks a read for one provider as in flight. It reports whether the
@@ -294,21 +292,43 @@ func compatCatalogTargets(cfg *config.Config) []compatCatalogTarget {
 	return targets
 }
 
-// refreshProvider reads one provider's live model list and stores it.
-func (m *compatCatalogManager) refreshProvider(ctx context.Context, target compatCatalogTarget) {
+// refreshProvider reads one provider's live model list and stores it. It reports
+// whether the list changed.
+func (m *compatCatalogManager) refreshProvider(ctx context.Context, target compatCatalogTarget) bool {
 	models, errList := config.CompatCatalogModelList(ctx, target.baseURL, target.apiKey, target.proxyURL, m.fetcher)
 	if errList != nil {
 		// A failed refresh keeps the last known good list.
 		log.WithError(errList).Warnf("compat catalog: live model list unavailable for provider %s", compatCatalogProviderName(target.name))
-		return
+		return false
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	previous, existed := m.state[target.key()]
+	changed := !existed || !compatCatalogModelIDsEqual(previous.models, models)
 	m.state[target.key()] = &compatCatalogState{
 		target: target,
 		models: models,
 	}
-	m.generation++
+	if changed {
+		// The generation counts the changes to the live model lists, so a
+		// registration cache built before the change is discarded.
+		m.generation++
+	}
+	return changed
+}
+
+// compatCatalogModelIDsEqual reports whether two live model lists carry the same
+// model identifiers.
+func compatCatalogModelIDsEqual(left, right []config.CompatCatalogModel) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index].ID != right[index].ID {
+			return false
+		}
+	}
+	return true
 }
 
 // generationOf returns the current generation of the live model lists.
