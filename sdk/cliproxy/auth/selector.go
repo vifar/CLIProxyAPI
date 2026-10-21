@@ -1500,6 +1500,13 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 	if preservedAuthID != "" {
 		bindAuthID = preservedAuthID
 	}
+	// A matched binding whose credential is no longer available is replaced here.
+	// The transition depends on whether the replacement belongs to the same provider
+	// as the matched binding or to another one.
+	replacedProvider := ""
+	if match, ok := s.matcher.MatchFingerprintsWithContext(namespace, fingerprints, tailFingerprints, envDigest, minPrefixLength); ok {
+		replacedProvider = s.routingProviderKeyForAuthID(match.AuthID, available)
+	}
 	if bindRes := s.matcher.BindFingerprintsWithContext(namespace, fingerprints, tailFingerprints, envDigest, minPrefixLength, bindAuthID); bindRes.SessionID != "" {
 		opts.Metadata[cliproxyexecutor.LCPAffinitySessionIDMetadataKey] = bindRes.SessionID
 		opts.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey] = bindRes.SessionID
@@ -1546,11 +1553,23 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 			}
 			entry.Infof("session-affinity: LCP cache miss, new binding | session=%s auth=%s provider=%s model=%s", truncateSessionID(bindRes.SessionID), auth.ID, provider, model)
 		}
+		newProvider := s.routingProviderKey(auth)
+		transition := RoutingTransitionBindingCreated
+		if replacedProvider != "" {
+			// The matched binding's credential was unavailable, so the binding is
+			// replaced. A replacement in the same provider is a credential
+			// reselection; one in another provider is a provider failover.
+			transition = RoutingTransitionCredentialReselected
+			if newProvider != "" && newProvider != replacedProvider {
+				transition = RoutingTransitionProviderFailover
+			}
+		}
 		recordRoutingTransition(ctx, RoutingTransitionEvent{
-			Transition: RoutingTransitionBindingCreated,
-			Model:      model,
-			Provider:   s.routingProviderKey(auth),
-			Session:    bindRes.SessionID,
+			Transition:       transition,
+			Model:            model,
+			Provider:         newProvider,
+			PreviousProvider: replacedProvider,
+			Session:          bindRes.SessionID,
 		})
 	}
 	return auth, true, nil
