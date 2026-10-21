@@ -983,13 +983,6 @@ type OpenAICompatibilityModel struct {
 	// Alias is the model name alias that clients will use to reference this model.
 	Alias string `yaml:"alias" json:"alias"`
 
-	// Discovered marks a model that came from the provider's live model list
-	// rather than from the operator's configuration. It is runtime state: it is
-	// not written to the configuration file, and it tells the live catalog which
-	// rows it contributed, so a model the provider stops listing is dropped
-	// while the operator's own rows stay.
-	Discovered bool `yaml:"-" json:"-"`
-
 	// DisplayName is the optional human-readable name shown in model catalogs.
 	DisplayName string `yaml:"display-name,omitempty" json:"display-name,omitempty"`
 

@@ -120,11 +120,35 @@ func newRoutingSelector(state routingRuntimeState) coreauth.Selector {
 }
 
 func (s *Service) applyConfigUpdateWithAuthSynthesis(ctx context.Context, newCfg *config.Config, synthesizeConfigAuths bool) bool {
+	// The live model lists are merged back into the configuration before it is
+	// committed, so a configuration change that replaced the augmented rows with
+	// the operator's static rows does not drop the discovered models until the
+	// next network refresh.
+	newCfg = s.mergeCompatCatalogModels(newCfg)
 	commit := s.commitConfigUpdate(newCfg)
 	if commit.cfg == nil {
 		return false
 	}
 	return s.applyConfigRuntime(ctx, commit, synthesizeConfigAuths)
+}
+
+// mergeCompatCatalogModels merges the cached live model lists into a
+// configuration.
+//
+// The merge uses the operator's own rows, which the catalog manager keeps, so a
+// discovered model is never written into the configuration as if the operator had
+// configured it.
+func (s *Service) mergeCompatCatalogModels(newCfg *config.Config) *config.Config {
+	if s == nil || newCfg == nil {
+		return newCfg
+	}
+	s.cfgMu.RLock()
+	manager := s.compatCatalog
+	s.cfgMu.RUnlock()
+	if manager == nil {
+		return newCfg
+	}
+	return manager.mergeInto(newCfg)
 }
 
 // commitConfigUpdate applies only in-memory configuration state. Runtime work that
@@ -223,6 +247,23 @@ func (s *Service) configSequenceCurrent(sequence uint64) bool {
 	current := s.configSequence == sequence
 	s.configUpdateMu.Unlock()
 	return current
+}
+
+// configSnapshot returns the current configuration and its sequence.
+//
+// Both are read under the configuration update lock, which is the lock the
+// commits hold while they increment the sequence, so the snapshot and the sequence
+// always describe the same configuration.
+func (s *Service) configSnapshot() (*config.Config, uint64) {
+	if s == nil {
+		return nil, 0
+	}
+	s.configUpdateMu.Lock()
+	defer s.configUpdateMu.Unlock()
+	s.cfgMu.RLock()
+	cfg := s.cfg
+	s.cfgMu.RUnlock()
+	return cfg, s.configSequence
 }
 
 func (s *Service) applyConfigRuntime(ctx context.Context, commit configCommit, synthesizeConfigAuths bool) bool {

@@ -214,8 +214,9 @@ func CompatCatalogModelList(
 //
 // The configured rows are kept exactly as written, including several rows that share
 // an upstream name under different aliases: those are separate published models and
-// deduplicating them would drop a pinned alias. The known names are used only to
-// suppress a duplicate live addition.
+// deduplicating them would drop a pinned alias. The known names and the operator's
+// public aliases are reserved, so a discovered model never takes over a name the
+// operator already publishes.
 //
 // The merge is deterministic: the configured models keep their order, and the added
 // live models follow in the order the provider reported them.
@@ -232,6 +233,9 @@ func MergeCompatCatalogModels(configured []OpenAICompatibilityModel, live []Comp
 	for _, model := range configured {
 		merged = append(merged, model)
 		key := compatCatalogModelKey(model)
+		if alias := strings.TrimSpace(model.Alias); alias != "" {
+			aliases[alias] = struct{}{}
+		}
 		if key == "" {
 			continue
 		}
@@ -239,9 +243,6 @@ func MergeCompatCatalogModels(configured []OpenAICompatibilityModel, live []Comp
 			continue
 		}
 		known[key] = struct{}{}
-		if alias := strings.TrimSpace(model.Alias); alias != "" {
-			aliases[alias] = struct{}{}
-		}
 	}
 	for _, candidate := range live {
 		id := strings.TrimSpace(candidate.ID)
@@ -260,9 +261,8 @@ func MergeCompatCatalogModels(configured []OpenAICompatibilityModel, live []Comp
 		}
 		known[id] = struct{}{}
 		merged = append(merged, OpenAICompatibilityModel{
-			Name:       id,
-			Alias:      id,
-			Discovered: true,
+			Name:  id,
+			Alias: id,
 		})
 	}
 	return merged
@@ -277,22 +277,12 @@ func MergeCompatCatalogModels(configured []OpenAICompatibilityModel, live []Comp
 // list rather than a one-way accumulation. An operator who wants such a model
 // kept writes it into the configured list, where it is explicit.
 //
-// The live contribution is identified by the rows the previous merge added, which
-// are marked as discovered. A row the operator wrote down is never marked, so it
-// is never removed.
+// The live contribution is not marked in the configuration. The caller keeps the
+// operator's configured rows and the live list apart, and this merge is applied to
+// the operator's rows every time, so a discovered row can never become a
+// permanent pin by being written back to the configuration file.
 func ReconcileCompatCatalogModels(configured []OpenAICompatibilityModel, live []CompatCatalogModel, excluded []string) []OpenAICompatibilityModel {
-	if len(live) == 0 {
-		return configured
-	}
-	// The operator's rows are the ones that are not marked as discovered.
-	operatorRows := make([]OpenAICompatibilityModel, 0, len(configured))
-	for _, model := range configured {
-		if model.Discovered {
-			continue
-		}
-		operatorRows = append(operatorRows, model)
-	}
-	return MergeCompatCatalogModels(operatorRows, live, excluded)
+	return MergeCompatCatalogModels(configured, live, excluded)
 }
 
 // CompatCatalogModelExcluded reports whether a model ID matches one of the
