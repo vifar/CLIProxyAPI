@@ -154,8 +154,9 @@ The repository ships [config.yaml](config.yaml), ready to start on
 It carries the Ollama Cloud, OpenRouter and Vercel AI Gateway entries and model
 pins from the [compatible-provider guide introduced by PR #11](https://github.com/vifar/CLIProxyAPI/blob/e6268a0a3edeec5e12f28b8ebd4ed4ab4a8d1394/docs/compatible-providers.md).
 That guide owns the provider reference; this section explains starting the fork.
-The root file uses explicit model pins supported on main. The guide's live model
-refresh and compatible-provider `excluded-models` extension are part of
+The root file uses static model pins; it does not query provider catalogs or
+establish live model availability. The guide's live model refresh and
+compatible-provider `excluded-models` extension are part of
 [pending PR #8](https://github.com/vifar/CLIProxyAPI/pull/8).
 
 Start from the repository root with `go run ./cmd/server --config config.yaml`.

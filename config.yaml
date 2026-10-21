@@ -19,14 +19,8 @@ usage-statistics-enabled: true
 # credentials.
 request-retry: 3
 
-# Session-sticky round robin.
-#
-# A session stays on the provider and credential it was bound to, so a multi-turn
-# conversation keeps its prompt cache warm. When several providers expose the same
-# model name, traffic is split equally between the providers first and then between
-# that provider's credentials, so a provider's share does not scale with its
-# credential count. Bindings expire after one hour of inactivity; unavailable
-# credentials follow the existing failover and rebinding policy.
+# Session-sticky round robin. See README.md, Fork configuration, for shipped defaults
+# and docs/routing/provider-equal-mixed-round-robin.md for selection and failover rules.
 routing:
   strategy: round-robin
   session-affinity: true
@@ -41,9 +35,8 @@ remote-management:
   allow-remote: false
   secret-key: ""
 
-# Models a provider must not serve, using upstream's native key. A "*" entry
-# excludes every model for that provider. The fork writes this key directly; it
-# does not use an inclusion list and invert it.
+# Native OAuth/file-backed model exclusions. For per-credential overrides, see
+# the OAuth exclusion rules in config.example.yaml.
 oauth-excluded-models:
   claude:
     - "claude-haiku-4-5"
@@ -57,7 +50,7 @@ oauth-excluded-models:
     - "gpt-4"
     - "gpt-3.5-turbo"
 
-# OpenAI-compatible providers, with explicit model pins that work on main.
+# OpenAI-compatible providers with static model pins; see README.md, Fork configuration.
 # Keep disabled until you add credentials in a private deployment copy.
 openai-compatibility:
   # Ollama Cloud. Add its API key before enabling.
@@ -66,7 +59,6 @@ openai-compatibility:
     base-url: https://ollama.com/v1
     api-key-entries: []
     models:
-      # DeepSeek V4 Flash is the stable default alias.
       - name: deepseek-v4.1-flash
         alias: deepseek-v4.1-flash
       - name: deepseek-v4-flash
