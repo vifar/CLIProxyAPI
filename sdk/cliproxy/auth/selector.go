@@ -1305,7 +1305,21 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		replacedAliasAuthID, replacedAliasProvider = s.replacedAliasProvider(cacheKey, fallbackKey, availabilityCandidates)
 	}
 
-	if cachedAuthID, ok := s.cache.GetAndRefresh(cacheKey); ok {
+	// The binding is looked up, the attribution is consumed and the binding is
+	// written under one lock.
+	//
+	// The lookup used to happen outside the transaction, so two concurrent
+	// retries of one failed binding could both observe a miss: the first
+	// consumed the attribution and bound a credential, and the second then
+	// overwrote that binding and reported a creation, because it found no
+	// attribution left. The two replacements of one failed binding were
+	// reported as one replacement and one creation.
+	var cachedAuthID string
+	var cachedFound bool
+	s.withAffinityState(func(state *sessionAffinityState) {
+		cachedAuthID, cachedFound = s.cache.GetAndRefresh(cacheKey)
+	})
+	if cachedFound {
 		for _, auth := range available {
 			if auth.ID == cachedAuthID {
 				// A hit can still be the retry of a failed binding, so the
@@ -1442,6 +1456,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		return nil, nil
 	}
 	var failedProvider string
+	var currentBoundAuthID string
 	s.withAffinityState(func(state *sessionAffinityState) {
 		if fallbackKey != "" && !isSubagent && !isFork {
 			failedProvider = s.takeFailedBindingLocked(state, fallbackKey)
@@ -1454,6 +1469,13 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 			}
 		} else {
 			failedProvider = s.takeFailedBindingLocked(state, cacheKey)
+		}
+		// The binding is re-read under the same lock, so a concurrent retry that
+		// bound a credential in the meantime is seen. Without it, that binding
+		// would be overwritten and reported as a creation, and the replacement it
+		// was would be lost.
+		if bound, okBound := s.cache.Get(cacheKey); okBound {
+			currentBoundAuthID = bound
 		}
 		bindLocked(state, auth.ID)
 	})
@@ -1499,16 +1521,26 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		// The replacement is recorded once. The attribution of the failed binding
 		// is the signal for it, and a concurrent retry that consumed it finds a
 		// binding that was never failed.
+		//
+		// The binding that was in place when this selection took the lock is the
+		// other signal: a binding that a concurrent retry wrote is a replacement
+		// of it, not a creation.
+		replacedAuthID := currentBoundAuthID
+		replacedProvider := ""
+		if replacedAuthID != "" {
+			s.withAffinityState(func(state *sessionAffinityState) {
+				replacedProvider = state.boundProviders[replacedAuthID]
+			})
+		}
 		if replacedAliasAuthID != "" && replacedAliasAuthID != auth.ID {
+			replacedAuthID = replacedAliasAuthID
+			replacedProvider = replacedAliasProvider
+		}
+		if replacedAuthID != "" && replacedAuthID != auth.ID {
 			transition = RoutingTransitionCredentialReselected
-			previousProvider = replacedAliasProvider
+			previousProvider = replacedProvider
 			if failedProvider != "" {
 				previousProvider = failedProvider
-			} else if !s.failedBindingConsumed(cacheKey, fallbackKey) {
-				// The attribution was already consumed by a concurrent retry, so
-				// this one is not a replacement of the failed binding.
-				transition = RoutingTransitionBindingCreated
-				previousProvider = ""
 			}
 			if transition == RoutingTransitionCredentialReselected && newProvider != "" && newProvider != previousProvider {
 				transition = RoutingTransitionProviderFailover
@@ -1548,30 +1580,6 @@ func (s *SessionAffinitySelector) replacedAliasProvider(cacheKey, fallbackKey st
 		}
 	}
 	return "", ""
-}
-
-// failedBindingConsumed reports whether a failed binding's attribution was
-// already consumed.
-//
-// The attribution is consumed once, so a concurrent retry that finds none has a
-// binding that was never failed and must not report a replacement of it.
-func (s *SessionAffinitySelector) failedBindingConsumed(cacheKey, fallbackKey string) bool {
-	state := s.affinityState
-	if state == nil {
-		return false
-	}
-	state.mu.Lock()
-	defer state.mu.Unlock()
-	keys := []string{cacheKey}
-	if fallbackKey != "" && fallbackKey != cacheKey {
-		keys = append(keys, fallbackKey)
-	}
-	for _, key := range keys {
-		if _, ok := state.failedBindings[key]; ok {
-			return false
-		}
-	}
-	return true
 }
 
 // routingProviderKey returns the provider key a selected auth belongs to.
@@ -1728,38 +1736,6 @@ func failedBindingKeyForBinding(cacheKey, fallbackKey string) string {
 // it, and an unrelated conversation cannot consume the record.
 func lcpFailedBindingKey(namespace, sequenceIdentity string) string {
 	return namespace + "\x00" + sequenceIdentity
-}
-
-// takeFailedBindingForBinding returns and clears the provider recorded for a
-// failed binding, under every identifier that names it.
-//
-// The alias is read first, because it is the identifier that does not change
-// when the primary identifier does. Every identifier's record is cleared, so a
-// record cannot survive under one of them and be picked up later by an
-// unrelated replacement.
-func (s *SessionAffinitySelector) takeFailedBindingForBinding(cacheKey, fallbackKey string) string {
-	state := s.affinityState
-	if state == nil {
-		return ""
-	}
-	// The whole consumption is one step, so a concurrent publication cannot
-	// interleave with it: a selection that consumed the attribution and a
-	// result handling that published it are ordered.
-	state.mu.Lock()
-	defer state.mu.Unlock()
-	provider := ""
-	if fallbackKey != "" {
-		provider = s.takeFailedBindingLocked(state, fallbackKey)
-	}
-	if provider == "" {
-		provider = s.takeFailedBindingLocked(state, cacheKey)
-	}
-	if fallbackKey != "" {
-		// The primary's record is cleared even when the alias carried the
-		// attribution.
-		s.takeFailedBindingLocked(state, cacheKey)
-	}
-	return provider
 }
 
 // takeFailedBindingLocked returns and clears the provider recorded for a failed
@@ -2482,41 +2458,47 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 	// published. Otherwise it could bind a different credential in between, and
 	// the attribution would describe a binding that no longer exists.
 	//
-	// The attribution is published inside the cache's lock, so the removal and
-	// the attribution are one step. The affinity state's lock is taken first, so
-	// a concurrent selection that consumes the attribution cannot interleave.
-	publishAttribution := func(removedAuthID string) {
-		state := s.affinityState
-		if state == nil {
-			return
+	// The removal of the binding and the publication of its attribution are one
+	// step, under the affinity state's lock.
+	//
+	// The lock order is fixed: the affinity state's lock is taken first and the
+	// cache's lock is only ever taken inside it. A selection that binds takes
+	// them in the same order, so the two cannot deadlock.
+	//
+	// The attribution is published after the removal, and the removal is
+	// confirmed before it is: a late failure from a credential the session has
+	// already rebound away from must not be recorded as a replacement.
+	s.withAffinityState(func(state *sessionAffinityState) {
+		publishAttribution := func(removedAuthID string) {
+			if state == nil {
+				return
+			}
+			// The provider is read from the state directly, because the lookup
+			// takes the same lock.
+			providerKey := state.boundProviders[removedAuthID]
+			if providerKey == "" {
+				providerKey = s.routingProviderKeyForAuthID(removedAuthID, nil)
+			}
+			if providerKey == "" {
+				return
+			}
+			s.rememberBoundProviderLocked(state, removedAuthID, providerKey)
+			// The record is stored under the identifier that names the binding
+			// stably, so a retry that arrives with a different primary identifier
+			// still finds it.
+			s.rememberFailedBindingLocked(state, failedBindingKeyForBinding(cacheKey, fallbackKey), providerKey)
 		}
-		state.mu.Lock()
-		defer state.mu.Unlock()
-		// The provider is read from the state directly, because the lookup
-		// takes the same lock.
-		providerKey := state.boundProviders[removedAuthID]
-		if providerKey == "" {
-			providerKey = s.routingProviderKeyForAuthID(removedAuthID, nil)
-		}
-		if providerKey == "" {
-			return
-		}
-		s.rememberBoundProviderLocked(state, removedAuthID, providerKey)
-		// The record is stored under the identifier that names the binding
-		// stably, so a retry that arrives with a different primary identifier
-		// still finds it.
-		s.rememberFailedBindingLocked(state, failedBindingKeyForBinding(cacheKey, fallbackKey), providerKey)
-	}
-	if _, okRemoved := s.cache.CompareAndDeleteReporting(cacheKey, res.AuthID, publishAttribution); okRemoved {
-		_ = okRemoved
-	}
-	if fallbackKey != "" {
-		// The fallback alias points at the same binding, so it carries the same
-		// attribution. A retry through the alias finds it.
-		if _, okRemoved := s.cache.CompareAndDeleteReporting(fallbackKey, res.AuthID, publishAttribution); okRemoved {
+		if _, okRemoved := s.cache.CompareAndDeleteReporting(cacheKey, res.AuthID, publishAttribution); okRemoved {
 			_ = okRemoved
 		}
-	}
+		if fallbackKey != "" {
+			// The fallback alias points at the same binding, so it carries the same
+			// attribution. A retry through the alias finds it.
+			if _, okRemoved := s.cache.CompareAndDeleteReporting(fallbackKey, res.AuthID, publishAttribution); okRemoved {
+				_ = okRemoved
+			}
+		}
+	})
 }
 
 // normalizedSessionCandidate validates an explicit client-provided session signal.

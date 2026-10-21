@@ -645,7 +645,8 @@ func TestSessionAffinityFailureAttributionSurvivesAPrimaryChange(t *testing.T) {
 func TestSessionAffinityConcurrentRetriesConsumeTheAttributionOnce(t *testing.T) {
 	t.Parallel()
 
-	selector, _, providerA, model := routingTransitionTestSelector(t, NewRoutingTransitionRecorder(10))
+	recorder := NewRoutingTransitionRecorder(10)
+	selector, _, providerA, model := routingTransitionTestSelector(t, recorder)
 
 	// The conversation is bound to the first credential.
 	opts := cliproxyexecutor.Options{
@@ -709,5 +710,27 @@ func TestSessionAffinityConcurrentRetriesConsumeTheAttributionOnce(t *testing.T)
 	state.mu.Unlock()
 	if remaining != 0 {
 		t.Fatalf("failed binding records = %d, want 0: the attribution is consumed once", remaining)
+	}
+
+	// The two retries replaced the failed binding: one of them reported the
+	// replacement, and the other reported that it replaced the binding the first
+	// one wrote. Neither reported a creation of the failed binding.
+	events := recorder.Snapshot().Events
+	replacements := 0
+	creations := 0
+	for _, event := range events {
+		switch event.Transition {
+		case RoutingTransitionCredentialReselected, RoutingTransitionProviderFailover:
+			replacements++
+		case RoutingTransitionBindingCreated:
+			creations++
+		}
+	}
+	if replacements < 1 {
+		t.Fatalf("replacements = %d, want at least 1: %+v", replacements, events)
+	}
+	// The one creation is the binding of the first pick, before the failure.
+	if creations > 1 {
+		t.Fatalf("creations = %d, want at most 1: %+v", creations, events)
 	}
 }
