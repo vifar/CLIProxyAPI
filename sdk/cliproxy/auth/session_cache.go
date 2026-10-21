@@ -329,20 +329,8 @@ func (c *SessionCache) Touch(sessionID, expectedAuthID string) bool {
 
 // CompareAndDelete removes the session binding only if it is currently bound to expectedAuthID.
 func (c *SessionCache) CompareAndDelete(sessionID, expectedAuthID string) bool {
-	removed, ok := c.CompareAndDeleteReturning(sessionID, expectedAuthID)
+	removed, ok := c.CompareAndDeleteReporting(sessionID, expectedAuthID, nil)
 	return ok && removed != ""
-}
-
-// CompareAndDeleteReturning removes a binding only if it still points at the
-// expected credential, and reports the credential it removed.
-//
-// The removal and the report happen under one lock, so a concurrent request
-// cannot observe the removal before the caller has learned what was removed.
-// A caller that publishes an attribution after the removal would otherwise have
-// a window in which another request can select and bind a different credential,
-// and the attribution would then describe a binding that no longer exists.
-func (c *SessionCache) CompareAndDeleteReturning(sessionID, expectedAuthID string) (string, bool) {
-	return c.CompareAndDeleteReporting(sessionID, expectedAuthID, nil)
 }
 
 // CompareAndDeleteReporting removes a binding only if it still points at the

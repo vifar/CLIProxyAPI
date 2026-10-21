@@ -1382,6 +1382,18 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		}
 	}
 
+	// The attribution is consumed before the binding is written. A concurrent
+	// retry that bound first would otherwise consume the attribution itself and
+	// report a creation, while this request reported the replacement: the two
+	// replacements of one failed binding would be reported as one replacement and
+	// one creation.
+	var failedProvider string
+	if fallbackKey != "" && !isSubagent && !isFork {
+		failedProvider = s.takeFailedBindingForBinding(cacheKey, fallbackKey)
+	} else {
+		failedProvider = s.takeFailedBinding(cacheKey)
+	}
+
 	auth, err := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
 	if err != nil {
 		return nil, err
@@ -1406,16 +1418,6 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	// identifier is its parent's session, and a fork's is its parent's session
 	// too, but those are separate bindings with their own affinity: a failure
 	// recorded for the parent is not a failure of the subagent's binding.
-	// The primary and the alias point at the same binding, so both records
-	// describe the same failure. They are consumed together, so a stale record
-	// under one of them cannot be picked up later by an unrelated replacement
-	// and reported against the wrong provider.
-	var failedProvider string
-	if fallbackKey != "" && !isSubagent && !isFork {
-		failedProvider = s.takeFailedBindingForBinding(cacheKey, fallbackKey)
-	} else {
-		failedProvider = s.takeFailedBinding(cacheKey)
-	}
 	if failedProvider != "" {
 		// The credential this session was bound to failed, so this is the
 		// replacement of that binding rather than a new one.
@@ -1630,26 +1632,6 @@ func failedBindingKeyForBinding(cacheKey, fallbackKey string) string {
 // it, and an unrelated conversation cannot consume the record.
 func lcpFailedBindingKey(namespace, sequenceIdentity string) string {
 	return namespace + "\x00" + sequenceIdentity
-}
-
-// rememberFailedBindingForBinding records a failed binding under the identifier
-// that names it stably.
-//
-// A binding can be addressed by more than one identifier: a request may carry
-// a different primary identifier and the same alias. The alias is the
-// identifier that does not change, so the record is keyed by it. A record under
-// the primary identifier alone would survive a change of the primary and be
-// picked up later by an unrelated replacement, which would then be reported
-// against the wrong provider.
-//
-// When there is no alias, the primary identifier is the only name the binding
-// has, so the record is keyed by it.
-func (s *SessionAffinitySelector) rememberFailedBindingForBinding(cacheKey, fallbackKey, providerKey string) {
-	if fallbackKey != "" {
-		s.rememberFailedBinding(fallbackKey, providerKey)
-		return
-	}
-	s.rememberFailedBinding(cacheKey, providerKey)
 }
 
 // takeFailedBindingForBinding returns and clears the provider recorded for a
@@ -1878,6 +1860,10 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 			}
 		}
 	}
+	// The attribution is consumed before the sequence is bound. A concurrent
+	// retry that bound first would otherwise consume the attribution itself and
+	// report a creation, while this request reported the replacement.
+	lcpFailedProvider := s.takeFailedBinding(lcpFailedBindingKey(namespace, cliproxysession.SequenceIdentity(fingerprints)))
 	if bindRes := s.matcher.BindFingerprintsWithContext(namespace, fingerprints, tailFingerprints, envDigest, minPrefixLength, bindAuthID); bindRes.SessionID != "" {
 		opts.Metadata[cliproxyexecutor.LCPAffinitySessionIDMetadataKey] = bindRes.SessionID
 		opts.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey] = bindRes.SessionID
@@ -1944,7 +1930,7 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 			// The exact sequence's failure takes precedence over a prefix match.
 			// A prefix match can find a surviving ancestor, and that ancestor's
 			// provider is not the provider whose credential actually failed.
-			failedProvider := s.takeFailedBinding(lcpFailedBindingKey(namespace, cliproxysession.SequenceIdentity(fingerprints)))
+			failedProvider := lcpFailedProvider
 			if failedProvider != "" {
 				transition = RoutingTransitionCredentialReselected
 				if newProvider != "" && newProvider != failedProvider {
