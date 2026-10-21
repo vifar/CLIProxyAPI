@@ -1148,9 +1148,8 @@ func (s *SessionAffinitySelector) withProviderEqualFallback() *SessionAffinitySe
 // applies to cold bindings, requests without a session, and genuine bound-credential
 // failover, so the fallback selector only ever receives the highest available priority tier.
 //
-// Note: The cache key includes provider, session ID, and model to handle cases where
-// a session uses multiple models (e.g., gemini-2.5-pro and gemini-3-flash-preview)
-// that may be supported by different auth credentials, and to avoid cross-provider conflicts.
+// Session bindings use sessionAffinityNamespace to isolate routes and include the
+// model because a session can use models supported by different credentials.
 func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	entry := selectorLogEntry(ctx)
 	if opts.Metadata == nil {
