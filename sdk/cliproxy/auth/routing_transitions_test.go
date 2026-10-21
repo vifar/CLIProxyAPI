@@ -351,3 +351,30 @@ func TestRoutingTransitionClassifiesAnLCPReplacementByProvider(t *testing.T) {
 	}
 	_ = recorder
 }
+
+// TestSessionAffinityCopySharesTheAffinityState asserts that a copy of the session
+// affinity selector shares the state object, with its lock.
+//
+// The maps and their lock must be shared together. A copy that shared the maps
+// but copied the lock would let two goroutines write the same map under different
+// locks, which is a process-fatal concurrent-map panic.
+func TestSessionAffinityCopySharesTheAffinityState(t *testing.T) {
+	t.Parallel()
+
+	affinity := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Hour,
+	})
+	t.Cleanup(affinity.Stop)
+
+	copied := affinity.withProviderEqualFallback(NewProviderEqualSelector())
+	if copied == affinity {
+		t.Fatal("the copy must be a distinct selector")
+	}
+	if copied.affinityState == nil || affinity.affinityState == nil {
+		t.Fatal("the affinity state must exist")
+	}
+	if copied.affinityState != affinity.affinityState {
+		t.Fatal("the copy must share the affinity state object")
+	}
+}

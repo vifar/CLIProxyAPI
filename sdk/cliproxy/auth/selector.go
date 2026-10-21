@@ -916,19 +916,37 @@ type SessionAffinitySelector struct {
 	subagentAffinity  bool
 	rebindOnQuotaOnly bool
 
-	// boundProviders remembers which provider a bound credential belongs to, so a
-	// routing transition can tell a credential reselection inside the same
-	// provider from a failover to another provider. The bound credential may have
-	// left the eligible set entirely, so the provider cannot always be recovered
-	// from the available candidates.
-	boundProvidersMu sync.Mutex
-	boundProviders   map[string]string
+	// affinityState holds the state a routing transition reads and writes.
+	//
+	// It is one object with one lock, and it is shared by a copy of this selector.
+	// The maps and their lock must not be shared without each other: a copy that
+	// shared the maps but copied the lock would let two goroutines write the same
+	// map under different locks, which is a process-fatal concurrent-map panic.
+	affinityState *sessionAffinityState
+}
 
+// sessionAffinityState is the shared state of the session affinity selector.
+type sessionAffinityState struct {
+	// mu guards the maps below.
+	mu sync.Mutex
+	// boundProviders remembers which provider a bound credential belongs to, so a
+	// routing transition can tell a credential reselection inside the same provider
+	// from a failover to another provider. The bound credential may have left the
+	// eligible set entirely, so the provider cannot always be recovered from the
+	// available candidates.
+	boundProviders map[string]string
 	// failedBindings remembers the provider of a binding whose credential failed,
 	// so the retry that follows is reported as the replacement it is. The records
 	// are bounded and they expire, so a client cannot grow the map without limit.
-	failedBindingsMu sync.Mutex
-	failedBindings   map[string]failedBindingRecord
+	failedBindings map[string]failedBindingRecord
+}
+
+// newSessionAffinityState creates the shared state.
+func newSessionAffinityState() *sessionAffinityState {
+	return &sessionAffinityState{
+		boundProviders: make(map[string]string),
+		failedBindings: make(map[string]failedBindingRecord),
+	}
 }
 
 // failedBindingRecord is one remembered failed binding.
@@ -1106,11 +1124,12 @@ func NewSessionAffinitySelectorWithConfig(cfg SessionAffinityConfig) *SessionAff
 		matcher:           cliproxysession.NewMerklePrefixMatcher(cfg.TTL),
 		subagentAffinity:  subagentAffinity,
 		rebindOnQuotaOnly: rebindOnQuotaOnly,
-		// The maps are created here rather than on first use, so a copy of this
-		// selector shares them. A copy that lazily created its own maps would
-		// remember a binding the original selector's result handling never saw.
-		boundProviders: make(map[string]string),
-		failedBindings: make(map[string]failedBindingRecord),
+		// The state is created here rather than on first use, so a copy of this
+		// selector shares it, with its lock. A copy that lazily created its own
+		// state would remember a binding the original selector's result handling
+		// never saw, and a copy that shared the maps without their lock would let
+		// two goroutines write the same map under different locks.
+		affinityState: newSessionAffinityState(),
 	}
 }
 
@@ -1424,19 +1443,20 @@ func (s *SessionAffinitySelector) rememberBoundProvider(authID, providerKey stri
 	if s == nil || authID == "" || providerKey == "" {
 		return
 	}
-	s.boundProvidersMu.Lock()
-	defer s.boundProvidersMu.Unlock()
-	if s.boundProviders == nil {
-		s.boundProviders = make(map[string]string)
+	state := s.affinityState
+	if state == nil {
+		return
 	}
-	if len(s.boundProviders) >= maxBoundProviderEntries {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if len(state.boundProviders) >= maxBoundProviderEntries {
 		// Drop an arbitrary entry rather than grow without bound.
-		for key := range s.boundProviders {
-			delete(s.boundProviders, key)
+		for key := range state.boundProviders {
+			delete(state.boundProviders, key)
 			break
 		}
 	}
-	s.boundProviders[authID] = providerKey
+	state.boundProviders[authID] = providerKey
 }
 
 // boundProviderFor returns the remembered provider of a bound credential, falling
@@ -1445,9 +1465,13 @@ func (s *SessionAffinitySelector) boundProviderFor(authID string, candidates []*
 	if s == nil || authID == "" {
 		return ""
 	}
-	s.boundProvidersMu.Lock()
-	remembered := s.boundProviders[authID]
-	s.boundProvidersMu.Unlock()
+	state := s.affinityState
+	if state == nil {
+		return ""
+	}
+	state.mu.Lock()
+	remembered := state.boundProviders[authID]
+	state.mu.Unlock()
 	if remembered != "" {
 		return remembered
 	}
@@ -1468,30 +1492,40 @@ func (s *SessionAffinitySelector) rememberFailedBinding(bindingKey, providerKey 
 	if s == nil || bindingKey == "" || providerKey == "" {
 		return
 	}
-	s.failedBindingsMu.Lock()
-	defer s.failedBindingsMu.Unlock()
-	if s.failedBindings == nil {
-		s.failedBindings = make(map[string]failedBindingRecord)
+	state := s.affinityState
+	if state == nil {
+		return
 	}
-	s.expireFailedBindingsLocked(time.Now())
-	if len(s.failedBindings) >= maxFailedBindingEntries {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	s.expireFailedBindingsLocked(state, time.Now())
+	if len(state.failedBindings) >= maxFailedBindingEntries {
 		// Drop the oldest record rather than grow without bound.
 		oldestKey := ""
 		var oldest time.Time
-		for key, record := range s.failedBindings {
+		for key, record := range state.failedBindings {
 			if oldestKey == "" || record.at.Before(oldest) {
 				oldestKey = key
 				oldest = record.at
 			}
 		}
 		if oldestKey != "" {
-			delete(s.failedBindings, oldestKey)
+			delete(state.failedBindings, oldestKey)
 		}
 	}
-	s.failedBindings[bindingKey] = failedBindingRecord{
+	state.failedBindings[bindingKey] = failedBindingRecord{
 		provider: providerKey,
 		at:       time.Now(),
 	}
+}
+
+// lcpFailedBindingKey is the key an LCP sequence's failure is recorded under.
+//
+// The namespace carries the provider and the model, and the credential identifies
+// the sequence, so a failure for one model cannot be consumed by a request for
+// another.
+func lcpFailedBindingKey(namespace, authID string) string {
+	return namespace + "\x00" + authID
 }
 
 // takeFailedBinding returns and clears the provider recorded for a failed binding.
@@ -1499,21 +1533,30 @@ func (s *SessionAffinitySelector) takeFailedBinding(bindingKey string) string {
 	if s == nil || bindingKey == "" {
 		return ""
 	}
-	s.failedBindingsMu.Lock()
-	defer s.failedBindingsMu.Unlock()
-	record, ok := s.failedBindings[bindingKey]
+	state := s.affinityState
+	if state == nil {
+		return ""
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	record, ok := state.failedBindings[bindingKey]
 	if !ok {
 		return ""
 	}
-	delete(s.failedBindings, bindingKey)
+	delete(state.failedBindings, bindingKey)
+	// The record is only usable while it is fresh. Expiration is checked here as
+	// well as on insertion, so a quiet session cannot consume a stale record.
+	if time.Since(record.at) > failedBindingTTL {
+		return ""
+	}
 	return record.provider
 }
 
 // expireFailedBindingsLocked removes the records that have expired.
-func (s *SessionAffinitySelector) expireFailedBindingsLocked(now time.Time) {
-	for key, record := range s.failedBindings {
+func (s *SessionAffinitySelector) expireFailedBindingsLocked(state *sessionAffinityState, now time.Time) {
+	for key, record := range state.failedBindings {
 		if now.Sub(record.at) > failedBindingTTL {
-			delete(s.failedBindings, key)
+			delete(state.failedBindings, key)
 		}
 	}
 }
@@ -1687,7 +1730,14 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 		}
 		newProvider := s.routingProviderKey(auth)
 		transition := RoutingTransitionBindingCreated
-		if replacedProvider != "" {
+		previousProvider := ""
+		switch {
+		case preservedAuthID != "":
+			// A preserved binding is not replaced: the session stays bound to its
+			// credential and another one serves the request, so the bound provider
+			// is kept and the one that served the request is not recorded as the
+			// bound one.
+		case replacedProvider != "":
 			// The matched binding's credential was unavailable, so the binding is
 			// replaced. A replacement in the same provider is a credential
 			// reselection; one in another provider is a provider failover.
@@ -1695,20 +1745,27 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 			if newProvider != "" && newProvider != replacedProvider {
 				transition = RoutingTransitionProviderFailover
 			}
-		} else if newProvider != "" && preservedAuthID == "" {
-			// The bound provider is remembered, so a later replacement of this
-			// binding can be told apart from a replacement in another provider.
-			//
-			// A preserved binding is not replaced: the session stays bound to its
-			// credential, so its provider is kept and the one that served the
-			// request is not recorded as the bound one.
-			s.rememberBoundProvider(bindAuthID, newProvider)
+			previousProvider = replacedProvider
+		default:
+			// The sequence may have been removed by a credential-attributed failure,
+			// in which case the retry is the replacement of that binding.
+			if failedProvider := s.takeFailedBinding(lcpFailedBindingKey(namespace, bindAuthID)); failedProvider != "" {
+				transition = RoutingTransitionCredentialReselected
+				if newProvider != "" && newProvider != failedProvider {
+					transition = RoutingTransitionProviderFailover
+				}
+				previousProvider = failedProvider
+			} else if newProvider != "" {
+				// The bound provider is remembered, so a later replacement of this
+				// binding can be told apart from a replacement in another provider.
+				s.rememberBoundProvider(bindAuthID, newProvider)
+			}
 		}
 		recordRoutingTransition(ctx, RoutingTransitionEvent{
 			Transition:       transition,
 			Model:            model,
 			Provider:         newProvider,
-			PreviousProvider: replacedProvider,
+			PreviousProvider: previousProvider,
 			Session:          bindRes.SessionID,
 		})
 	}
@@ -1993,6 +2050,12 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 							generation = gen
 						}
 					}
+					// The provider of the sequence that is about to be removed is
+					// retained, so the retry that follows is reported as the
+					// replacement it is rather than as a new binding.
+					if providerKey := s.boundProviderFor(res.AuthID, nil); providerKey != "" {
+						s.rememberFailedBinding(lcpFailedBindingKey(namespace, res.AuthID), providerKey)
+					}
 					if !s.matcher.RemoveFingerprintsBefore(namespace, fingerprints, res.AuthID, generation) && res.Options.Metadata != nil {
 						isFork, _ := res.Options.Metadata[cliproxyexecutor.IsForkMetadataKey].(bool)
 						if !isFork {
@@ -2043,28 +2106,35 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 
 	// The binding is removed only if it still points at the credential that failed.
 	// A late failure from a credential the session has already rebound away from
-	// must not be recorded as a replacement.
+	// must not be recorded as a replacement, so the attribution is published only
+	// after the removal is confirmed.
 	//
 	// The provider of the removed binding is remembered, so the retry that follows
 	// can be reported as the replacement it is, rather than as a new binding. The
 	// record is keyed by the binding's own key, so a failure for one model cannot
 	// be consumed by a request for another.
 	if boundAuthID, okBound := s.cache.Get(cacheKey); okBound && boundAuthID == res.AuthID {
-		if providerKey := s.boundProviderFor(boundAuthID, nil); providerKey != "" {
-			s.rememberBoundProvider(boundAuthID, providerKey)
-			s.rememberFailedBinding(cacheKey, providerKey)
+		if s.cache.CompareAndDelete(cacheKey, res.AuthID) {
+			if providerKey := s.boundProviderFor(boundAuthID, nil); providerKey != "" {
+				s.rememberBoundProvider(boundAuthID, providerKey)
+				s.rememberFailedBinding(cacheKey, providerKey)
+			}
 		}
+	} else {
+		s.cache.CompareAndDelete(cacheKey, res.AuthID)
 	}
-	s.cache.CompareAndDelete(cacheKey, res.AuthID)
 	if fallbackKey != "" {
 		// The fallback alias points at the same binding, so it carries the same
 		// attribution. A retry through the alias finds it.
 		if boundAuthID, okBound := s.cache.Get(fallbackKey); okBound && boundAuthID == res.AuthID {
-			if providerKey := s.boundProviderFor(boundAuthID, nil); providerKey != "" {
-				s.rememberFailedBinding(fallbackKey, providerKey)
+			if s.cache.CompareAndDelete(fallbackKey, res.AuthID) {
+				if providerKey := s.boundProviderFor(boundAuthID, nil); providerKey != "" {
+					s.rememberFailedBinding(fallbackKey, providerKey)
+				}
 			}
+		} else {
+			s.cache.CompareAndDelete(fallbackKey, res.AuthID)
 		}
-		s.cache.CompareAndDelete(fallbackKey, res.AuthID)
 	}
 }
 
