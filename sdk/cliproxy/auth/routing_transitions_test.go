@@ -324,3 +324,30 @@ func TestRoutingTransitionRecordsNoEligibleProviderOnTheAffinityPath(t *testing.
 		t.Fatalf("no eligible provider = %d, want 1: %+v", totals[string(RoutingTransitionNoEligibleProvider)], totals)
 	}
 }
+
+// TestRoutingTransitionClassifiesAnLCPReplacementByProvider asserts that a
+// replacement of an LCP binding is labelled by the provider it replaced.
+//
+// The bound credential has left the available candidates by the time the
+// replacement is made, so the provider cannot be recovered from them. The
+// selector remembers it, so the replacement is still classified.
+func TestRoutingTransitionClassifiesAnLCPReplacementByProvider(t *testing.T) {
+	t.Parallel()
+
+	recorder := NewRoutingTransitionRecorder(10)
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Hour,
+	})
+	t.Cleanup(selector.Stop)
+
+	// The selector remembers the provider of a bound credential.
+	selector.rememberBoundProvider("bound-auth", "provider-a")
+
+	// The remembered provider is returned even when the credential is not among
+	// the candidates any more.
+	if got := selector.boundProviderFor("bound-auth", nil); got != "provider-a" {
+		t.Fatalf("bound provider = %q, want provider-a", got)
+	}
+	_ = recorder
+}

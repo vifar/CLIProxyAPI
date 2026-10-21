@@ -1475,6 +1475,12 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 				}
 				entry.Infof("session-affinity: LCP cache hit | session=%s prefix=%d auth=%s provider=%s model=%s", truncateSessionID(match.SessionID), match.PrefixLength, auth.ID, provider, model)
 			}
+			// The bound provider is remembered, so a later replacement of this
+			// binding can be told apart from a replacement in another provider even
+			// after the bound credential has left the available candidates.
+			if providerKey := s.routingProviderKey(auth); providerKey != "" {
+				s.rememberBoundProvider(auth.ID, providerKey)
+			}
 			recordRoutingTransition(ctx, RoutingTransitionEvent{
 				Transition: RoutingTransitionBindingHit,
 				Model:      model,
@@ -1503,9 +1509,13 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 	// A matched binding whose credential is no longer available is replaced here.
 	// The transition depends on whether the replacement belongs to the same provider
 	// as the matched binding or to another one.
+	//
+	// The matched credential has left the available candidates, so its provider
+	// cannot be recovered from them. The selector remembers the provider a bound
+	// credential belongs to.
 	replacedProvider := ""
 	if match, ok := s.matcher.MatchFingerprintsWithContext(namespace, fingerprints, tailFingerprints, envDigest, minPrefixLength); ok {
-		replacedProvider = s.routingProviderKeyForAuthID(match.AuthID, available)
+		replacedProvider = s.boundProviderFor(match.AuthID, available)
 	}
 	if bindRes := s.matcher.BindFingerprintsWithContext(namespace, fingerprints, tailFingerprints, envDigest, minPrefixLength, bindAuthID); bindRes.SessionID != "" {
 		opts.Metadata[cliproxyexecutor.LCPAffinitySessionIDMetadataKey] = bindRes.SessionID
@@ -1563,6 +1573,10 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 			if newProvider != "" && newProvider != replacedProvider {
 				transition = RoutingTransitionProviderFailover
 			}
+		} else if newProvider != "" {
+			// The bound provider is remembered, so a later replacement of this
+			// binding can be told apart from a replacement in another provider.
+			s.rememberBoundProvider(bindAuthID, newProvider)
 		}
 		recordRoutingTransition(ctx, RoutingTransitionEvent{
 			Transition:       transition,
