@@ -16,11 +16,12 @@ import (
 )
 
 type captureClaudeUsagePlugin struct {
+	baseURL string
 	records chan usage.Record
 }
 
 func (p *captureClaudeUsagePlugin) HandleUsage(_ context.Context, record usage.Record) {
-	if p == nil || record.Provider != "claude" {
+	if p == nil || record.Provider != "claude" || record.BaseURL != p.baseURL {
 		return
 	}
 	select {
@@ -68,11 +69,20 @@ func TestClaudeExecutor_ExecuteStream_Translated_ClientDisconnectAfterTerminalEv
 
 	pluginName := "test-claude-translated-disconnect"
 	plugin := &captureClaudeUsagePlugin{
+		baseURL: server.URL,
 		records: make(chan usage.Record, 4),
 	}
 	usage.RegisterNamedPlugin(pluginName, plugin)
 	t.Cleanup(func() {
 		usage.RegisterNamedPlugin(pluginName, noopClaudeUsagePlugin{})
+	})
+
+	// Usage dispatch is asynchronous, so another request can still be queued
+	// when this observer registers. It must only assert this upstream's record.
+	usage.PublishRecord(context.Background(), usage.Record{
+		Provider: "claude",
+		BaseURL:  "http://unrelated.invalid",
+		Detail:   usage.Detail{InputTokens: 5, OutputTokens: 2},
 	})
 
 	exec := NewClaudeExecutor(&config.Config{})
@@ -164,6 +174,7 @@ func TestClaudeExecutor_ExecuteStream_Passthrough_ClientDisconnectAfterTerminalE
 
 	pluginName := "test-claude-passthrough-disconnect"
 	plugin := &captureClaudeUsagePlugin{
+		baseURL: server.URL,
 		records: make(chan usage.Record, 4),
 	}
 	usage.RegisterNamedPlugin(pluginName, plugin)
