@@ -341,8 +341,8 @@ func TestCompatUsageReaderReportsUnsupportedAndDisabled(t *testing.T) {
 	if errRead != nil {
 		t.Fatalf("Read unsupported: %v", errRead)
 	}
-	if unsupported.Status != "unsupported" {
-		t.Fatalf("status = %q, want unsupported", unsupported.Status)
+	if unsupported.Status != "unavailable" {
+		t.Fatalf("status = %q, want unavailable", unsupported.Status)
 	}
 
 	disabled, errRead := reader.Read(context.Background(), cfg, credentials[1].ID, false)
