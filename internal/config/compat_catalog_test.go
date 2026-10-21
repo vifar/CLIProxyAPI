@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestCompatCatalogProviderForRecognizesSupportedHosts(t *testing.T) {
@@ -330,5 +332,82 @@ func TestMergeCompatCatalogModelsKeepsConfiguredRowsWhenOnlyLiveModelsAreKnown(t
 	}
 	if merged[0].Alias != "a" {
 		t.Fatalf("the configured alias changed: %+v", merged[0])
+	}
+}
+
+func TestReconcileCompatCatalogModelsDropsAModelTheProviderStoppedListing(t *testing.T) {
+	t.Parallel()
+
+	// The operator wrote one model down; the provider listed two more.
+	configured := []OpenAICompatibilityModel{
+		{Name: "operator-model", Alias: "operator-model"},
+		{Name: "discovered-a", Alias: "discovered-a", Discovered: true},
+		{Name: "discovered-b", Alias: "discovered-b", Discovered: true},
+	}
+	live := []CompatCatalogModel{{ID: "discovered-a"}, {ID: "discovered-c"}}
+
+	merged := ReconcileCompatCatalogModels(configured, live, nil)
+	names := make([]string, 0, len(merged))
+	for _, model := range merged {
+		names = append(names, model.Name)
+	}
+	// The operator's model stays, the model the provider still lists stays, the
+	// model it stopped listing is gone, and the new one is added.
+	want := []string{"operator-model", "discovered-a", "discovered-c"}
+	if len(names) != len(want) {
+		t.Fatalf("names = %v, want %v", names, want)
+	}
+	for index := range want {
+		if names[index] != want[index] {
+			t.Fatalf("names = %v, want %v", names, want)
+		}
+	}
+}
+
+func TestReconcileCompatCatalogModelsKeepsAnOperatorAlias(t *testing.T) {
+	t.Parallel()
+
+	// The operator pinned an alias for a model the provider also lists. The pin
+	// must survive the reconciliation.
+	configured := []OpenAICompatibilityModel{
+		{Name: "shared-upstream", Alias: "friendly-alias"},
+		{Name: "discovered-a", Alias: "discovered-a", Discovered: true},
+	}
+	live := []CompatCatalogModel{{ID: "shared-upstream"}, {ID: "discovered-a"}}
+
+	merged := ReconcileCompatCatalogModels(configured, live, nil)
+	found := false
+	for _, model := range merged {
+		if model.Alias == "friendly-alias" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the operator's alias was dropped: %+v", merged)
+	}
+}
+
+func TestDiscoveredModelsAreNotWrittenToTheConfiguration(t *testing.T) {
+	t.Parallel()
+
+	// The discovered marker is runtime state. It must never reach the file, or an
+	// operator's configuration would be rewritten with the provider's list.
+	rendered, errMarshal := yaml.Marshal(OpenAICompatibility{
+		Name:    "ollama-cloud",
+		BaseURL: "https://ollama.com/v1",
+		Models: []OpenAICompatibilityModel{
+			{Name: "operator-model", Alias: "operator-model"},
+			{Name: "discovered", Alias: "discovered", Discovered: true},
+		},
+	})
+	if errMarshal != nil {
+		t.Fatalf("marshal: %v", errMarshal)
+	}
+	text := string(rendered)
+	if strings.Contains(text, "discovered") && !strings.Contains(text, "name: discovered") {
+		t.Fatalf("the discovered marker was written: %s", text)
+	}
+	if strings.Contains(text, "Discovered") || strings.Contains(text, "discovered:") {
+		t.Fatalf("the discovered marker was written: %s", text)
 	}
 }

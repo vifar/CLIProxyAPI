@@ -149,20 +149,23 @@ func (m *compatCatalogManager) Refresh(ctx context.Context) {
 	if cfg == nil {
 		return
 	}
-	changed := false
 	for _, target := range compatCatalogTargets(cfg) {
 		if ctx.Err() != nil {
 			return
 		}
-		refreshCtx, cancel := context.WithTimeout(ctx, compatCatalogRefreshTimeout)
-		if m.refreshProvider(refreshCtx, target) {
-			changed = true
-		}
-		cancel()
+		// No deadline is imposed on the upstream request. A provider that
+		// establishes its connection promptly but takes a long time to return its
+		// catalog must not be cancelled while the response is read: the repository
+		// rule is that a timeout may only bound credential acquisition, never the
+		// network behavior after a connection is established. The caller's context
+		// still cancels the pass.
+		m.refreshProvider(ctx, target)
 	}
-	if changed {
-		m.publishLiveModels(ctx)
-	}
+	// The publication runs on every refresh, not only when the upstream list
+	// changed. A file reload replaces the augmented configuration with the
+	// provider's static models, so the discovered models have to be reconciled
+	// back even when the provider still reports the same list.
+	m.publishLiveModels(ctx)
 }
 
 // compatCatalogTargets returns the configured entries whose live model list is
@@ -263,14 +266,16 @@ func (m *compatCatalogManager) liveModelsFor(target compatCatalogTarget) []confi
 // The configured list is always the floor: a live list only adds models the
 // configuration does not mention, and it never removes a configured model.
 //
-// The publication goes through the service's configuration commit boundary, so a
-// file reload that commits meanwhile is not overwritten by a stale snapshot.
+// The publication is guarded by the configuration sequence the merge was computed
+// against. A file reload that committed meanwhile is therefore never overwritten by
+// a stale snapshot, and the reload's own models stand.
 func (m *compatCatalogManager) publishLiveModels(ctx context.Context) {
 	if m == nil || m.service == nil {
 		return
 	}
 	m.service.cfgMu.RLock()
 	current := m.service.cfg
+	sequence := m.service.configSequence
 	m.service.cfgMu.RUnlock()
 	if current == nil {
 		return
@@ -299,7 +304,9 @@ func (m *compatCatalogManager) publishLiveModels(ctx context.Context) {
 		if len(live) == 0 {
 			continue
 		}
-		updated := config.MergeCompatCatalogModels(provider.Models, live, provider.ExcludedModels)
+		// The live list replaces what it contributed before, so a model the
+		// provider stopped listing is dropped, while the operator's own rows stay.
+		updated := config.ReconcileCompatCatalogModels(provider.Models, live, provider.ExcludedModels)
 		if compatCatalogModelsEqual(provider.Models, updated) {
 			continue
 		}
@@ -310,10 +317,16 @@ func (m *compatCatalogManager) publishLiveModels(ctx context.Context) {
 		return
 	}
 
+	// The merge is only applied while the configuration it was computed against is
+	// still the current one. A reload that committed in the meantime keeps its own
+	// models, and the next refresh reconciles against the new configuration.
+	if !m.service.configSequenceCurrent(sequence) {
+		return
+	}
+
 	// The service's own configuration update path commits the merged
 	// configuration under the configuration update lock and then applies the
-	// runtime, so a file reload that committed while the merge was computed is
-	// never overwritten by a stale snapshot.
+	// runtime.
 	//
 	// The runtime application re-registers the affected credentials, so the added
 	// models are published to the model registry and become routable.

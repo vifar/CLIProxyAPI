@@ -249,11 +249,39 @@ func MergeCompatCatalogModels(configured []OpenAICompatibilityModel, live []Comp
 		}
 		known[id] = struct{}{}
 		merged = append(merged, OpenAICompatibilityModel{
-			Name:  id,
-			Alias: id,
+			Name:       id,
+			Alias:      id,
+			Discovered: true,
 		})
 	}
 	return merged
+}
+
+// ReconcileCompatCatalogModels replaces the models a provider's live list
+// contributed with the models its current live list reports.
+//
+// The configured list is the operator's floor: a model the operator wrote down
+// stays, whatever the provider reports. A model that was only ever discovered
+// live is removed once the provider stops listing it, so the live list is a live
+// list rather than a one-way accumulation. An operator who wants such a model
+// kept writes it into the configured list, where it is explicit.
+//
+// The live contribution is identified by the rows the previous merge added, which
+// are marked as discovered. A row the operator wrote down is never marked, so it
+// is never removed.
+func ReconcileCompatCatalogModels(configured []OpenAICompatibilityModel, live []CompatCatalogModel, excluded []string) []OpenAICompatibilityModel {
+	if len(live) == 0 {
+		return configured
+	}
+	// The operator's rows are the ones that are not marked as discovered.
+	operatorRows := make([]OpenAICompatibilityModel, 0, len(configured))
+	for _, model := range configured {
+		if model.Discovered {
+			continue
+		}
+		operatorRows = append(operatorRows, model)
+	}
+	return MergeCompatCatalogModels(operatorRows, live, excluded)
 }
 
 // CompatCatalogModelExcluded reports whether a model ID matches one of the

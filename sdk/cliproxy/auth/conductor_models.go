@@ -154,7 +154,34 @@ func resolveOpenAICompatUpstreamModelPool(cfg *internalconfig.Config, auth *Auth
 	if entry == nil {
 		return nil
 	}
-	return resolveModelAliasPoolFromConfigModels(requestedModel, asModelAliasEntries(entry.Models))
+	return resolveModelAliasPoolFromConfigModels(requestedModel, asModelAliasEntries(compatConfigRoutableModels(entry)))
+}
+
+// compatConfigRoutableModels returns the configured models a provider may actually
+// route to.
+//
+// The exclusion is matched against the upstream model name, so an excluded model
+// cannot be reached through a shared alias: the routing pool is built from the
+// filtered rows, not from the published model list.
+func compatConfigRoutableModels(entry *internalconfig.OpenAICompatibility) []internalconfig.OpenAICompatibilityModel {
+	if entry == nil || len(entry.Models) == 0 {
+		return nil
+	}
+	if len(entry.ExcludedModels) == 0 {
+		return entry.Models
+	}
+	filtered := make([]internalconfig.OpenAICompatibilityModel, 0, len(entry.Models))
+	for _, model := range entry.Models {
+		name := strings.TrimSpace(model.Name)
+		if name == "" {
+			name = strings.TrimSpace(model.Alias)
+		}
+		if internalconfig.CompatCatalogModelExcluded(name, entry.ExcludedModels) {
+			continue
+		}
+		filtered = append(filtered, model)
+	}
+	return filtered
 }
 
 func preserveRequestedModelSuffix(requestedModel, resolved string) string {
