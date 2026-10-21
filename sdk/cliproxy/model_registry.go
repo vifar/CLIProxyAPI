@@ -119,7 +119,12 @@ func (f modelRegistrationFence) withAuth(a *coreauth.Auth) modelRegistrationFenc
 	}
 	next := newModelRegistrationFence(a, nil)
 	next.globalExclusions = f.globalExclusions
+	// The compatible provider's own excluded-models list is carried over with the
+	// credential. The fence is rebuilt without a configuration here, so the list
+	// would be lost, and the publication would then compare an empty list against
+	// the current one and never publish.
 	next.compatAuth = f.compatAuth
+	next.compatExclusions = f.compatExclusions
 	next.fallbackExclusionProvider = f.fallbackExclusionProvider
 	next.registryEpoch = f.registryEpoch
 	return next

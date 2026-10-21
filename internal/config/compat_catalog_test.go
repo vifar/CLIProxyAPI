@@ -397,3 +397,30 @@ func TestMergeCompatCatalogModelsDoesNotCollideWithAnOperatorAlias(t *testing.T)
 		t.Fatalf("the operator's row was changed: %+v", merged[0])
 	}
 }
+
+func TestCompatCatalogModelExcludedMatchesTheUpstreamIdentity(t *testing.T) {
+	t.Parallel()
+
+	// A client may ask for a model with a thinking suffix, and the executor
+	// strips the suffix before sending the request upstream. An exclusion written
+	// for the upstream identity must still match.
+	excluded := []string{"openai/gpt-4.1"}
+	if !CompatCatalogModelExcluded("openai/gpt-4.1(high)", excluded) {
+		t.Fatal("a model with a thinking suffix must be excluded by its upstream name")
+	}
+	if !CompatCatalogModelExcluded("openai/gpt-4.1", excluded) {
+		t.Fatal("the upstream name must be excluded")
+	}
+	if CompatCatalogModelExcluded("openai/gpt-4o", excluded) {
+		t.Fatal("a different model must not be excluded")
+	}
+	// A suffix that is not a reasoning effort is part of the name.
+	if CompatCatalogModelExcluded("openai/gpt-4.1(turbo)", excluded) {
+		t.Fatal("a name that is not a reasoning suffix must not be stripped")
+	}
+	// The alias is not the upstream identity, so an exclusion for the upstream
+	// name does not match an unrelated model.
+	if CompatCatalogModelExcluded("some-other-model", excluded) {
+		t.Fatal("an unrelated model must not be excluded")
+	}
+}

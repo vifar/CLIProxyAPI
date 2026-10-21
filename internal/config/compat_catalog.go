@@ -263,6 +263,14 @@ func MergeCompatCatalogModels(configured []OpenAICompatibilityModel, live []Comp
 //
 // A pattern is an exact model ID, a prefix wildcard such as "gemini-2.5-*", a
 // suffix wildcard such as "*-preview", or a substring wildcard such as "*flash*".
+// CompatCatalogModelExcluded reports whether a model ID matches one of the
+// provider's exclusion patterns.
+//
+// The model name is matched both as written and with a thinking suffix removed.
+// A client may ask for a model with a suffix such as "(high)", and the executor
+// strips the suffix before sending the request upstream, so the identity that
+// reaches the provider is the name without it. An exclusion written for that
+// identity must still match.
 func CompatCatalogModelExcluded(modelID string, excluded []string) bool {
 	if len(excluded) == 0 {
 		return false
@@ -271,6 +279,8 @@ func CompatCatalogModelExcluded(modelID string, excluded []string) bool {
 	if value == "" {
 		return false
 	}
+	// The identity the upstream sees, with a thinking suffix removed.
+	upstream := strings.ToLower(strings.TrimSpace(compatCatalogStripThinkingSuffix(value)))
 	for _, item := range excluded {
 		pattern := strings.ToLower(strings.TrimSpace(item))
 		if pattern == "" {
@@ -279,8 +289,42 @@ func CompatCatalogModelExcluded(modelID string, excluded []string) bool {
 		if compatCatalogMatchWildcard(pattern, value) {
 			return true
 		}
+		if upstream != value && compatCatalogMatchWildcard(pattern, upstream) {
+			return true
+		}
 	}
 	return false
+}
+
+// compatCatalogStripThinkingSuffix removes a trailing thinking suffix from a
+// model name.
+//
+// A model name may carry a suffix in parentheses, such as "(high)", which
+// selects a reasoning effort rather than a different model. The suffix is
+// stripped before the request reaches the provider.
+func compatCatalogStripThinkingSuffix(model string) string {
+	trimmed := strings.TrimSpace(model)
+	if trimmed == "" {
+		return ""
+	}
+	open := strings.LastIndex(trimmed, "(")
+	if open <= 0 {
+		return trimmed
+	}
+	if !strings.HasSuffix(trimmed, ")") {
+		return trimmed
+	}
+	inner := strings.TrimSpace(trimmed[open+1 : len(trimmed)-1])
+	if inner == "" {
+		return trimmed
+	}
+	// Only a known reasoning effort is a suffix. Anything else is part of the
+	// model's name.
+	switch strings.ToLower(inner) {
+	case "minimal", "low", "medium", "high", "xhigh", "max", "none":
+		return strings.TrimSpace(trimmed[:open])
+	}
+	return trimmed
 }
 
 // compatCatalogMatchWildcard matches a value against a wildcard pattern.
