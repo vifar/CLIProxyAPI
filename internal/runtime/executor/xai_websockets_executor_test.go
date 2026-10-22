@@ -299,6 +299,10 @@ func TestXAIWebsocketsExecuteStreamSendsResponseCreateWithPreviousResponseID(t *
 	defer server.Close()
 
 	exec := NewXAIWebsocketsExecutor(&config.Config{})
+	// Each invocation owns its continuity state, including repeated test runs.
+	exec.store = &codexWebsocketSessionStore{sessions: make(map[string]*codexWebsocketSession)}
+	exec.idStore = &xaiWebsocketIDStateStore{sessions: make(map[string]*xaiWebsocketIDState)}
+	defer exec.CloseExecutionSession("execution-session-1")
 	auth := &cliproxyauth.Auth{
 		ID:       "xai-auth",
 		Provider: "xai",
