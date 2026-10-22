@@ -158,14 +158,14 @@ routing:
   # followed by prompt_cache_key, Responses conversation IDs, legacy body IDs,
   # execution or derived session identity, and the existing first-message hash fallback.
   # Automatic failover is always enabled when bound auth becomes unavailable.
-  # An established binding outranks credential priority: once a session is bound, that
-  # credential is kept even if a higher-priority credential recovers. Credential priority
+  # Within a binding scope (see the routing guide above), an established binding outranks
+  # credential priority: its credential is kept even if a higher-priority credential recovers. Priority
   # still decides cold bindings, requests without a session, and post-failover rebinding.
   session-affinity: false # default: false
   # How long session-to-auth bindings are retained. Default: 1h
   session-affinity-ttl: "1h"
   # When true (default), subagents (child sessions with parent references) inherit and bind
-  # to the parent's upstream credential across all providers (Claude, Codex, Antigravity, Gemini),
+  # to the parent's upstream credential within the same binding scope (see the routing guide above),
   # maximizing Prompt/KV Cache reuse and minimizing TTFT.
   # When false, subagents are distributed across the credential pool via the fallback selector
   # for maximum parallel concurrency.

@@ -6,9 +6,9 @@ When multiple enabled providers expose the same client-visible model name, built
 
 Previously, mixed round robin weighted provider selection by ready credential count. Session affinity could then preserve that initial bias. Provider-equal selection now applies in the scheduler, the legacy mixed-selection path used for per-account model aliases, and the round-robin fallback used by session affinity.
 
-This changes the traffic split for deployments with unequal credential counts across providers. Existing healthy session bindings are reused, so equal shares of new selections do not guarantee equal request volume across providers.
+This changes the traffic split for deployments with unequal credential counts across providers. Existing healthy session bindings are reused within their binding scope, so equal shares of new selections do not guarantee equal request volume across providers.
 
-Single-provider routing, `fill-first`, and `weighted-round-robin` retain their existing semantics. Explicit routing overrides remain authoritative. Plugin-selected credentials and CLIProxyAPIHome dispatch retain their own scheduling policies; plugin delegation to built-in mixed round robin uses this policy.
+Single-provider routing, `fill-first`, and `weighted-round-robin` retain their existing selection policies. Mixed-route session bindings use the provider-set scope described below with any affinity fallback. Explicit routing overrides remain authoritative. Plugin-selected credentials and CLIProxyAPIHome dispatch retain their own scheduling policies; plugin delegation to built-in mixed round robin uses this policy.
 
 ## Routing Semantics
 
@@ -36,15 +36,19 @@ Credential rotation is scoped by provider and canonical model. Traffic for one p
 
 With session affinity enabled, only its round-robin fallback is replaced by provider-equal selection. Weighted and fill-first fallbacks keep their own behavior, including positive-weight filtering for weighted routing.
 
-Existing identity extraction, binding reuse, inheritance, TTL, and invalidation logic remain in place. A cold or rebound session uses the fallback to select a provider and credential. A request without a usable session identity follows the fallback without storing a session binding.
+Existing identity extraction, binding reuse, inheritance, TTL, and invalidation logic remain in place. A cold or rebound session uses the fallback to select a provider and credential. A request without a usable explicit or inferred session identity follows the fallback without storing a session binding.
 
-For explicit session identities, the binding key remains:
+For explicit session identities, the binding key is:
 
 ```text
-route namespace + session identity + canonical model -> auth ID
+route namespace :: session identity :: canonical model -> auth ID
 ```
 
-Mixed routes use the literal namespace `mixed`. The auth ID identifies both provider and credential. The binding key does **not** include the canonical provider set. A cached credential is checked against current candidates before reuse; changing the provider set does not by itself create a new binding scope.
+Mixed routes use `mixed[<canonical provider set>]` as their namespace. Provider keys are normalized, deduplicated, sorted, then individually percent-encoded before comma-joining, so provider order does not change the scope. Encoding prevents delimiters in a provider name from changing the scope structure: a provider named `a,b` has a different scope from providers `a` and `b`. The set comes from the resolved route providers, not just credentials ready at the winning priority. The auth ID identifies both provider and credential, and a cached credential is still checked against current candidates before reuse.
+
+Changing the route's provider set creates a distinct binding scope even if the previously bound credential remains eligible. Returning to an earlier set can reuse its binding if it is still live and eligible. Single-provider routes keep their plain provider namespace. Longest-common-prefix (LCP) affinity for requests without an explicit session uses the same provider-set scope, in addition to its model and caller scope; selection, successful binding updates, and failure eviction use that same namespace.
+
+Affinity lookup observes scoped mixed bindings without selecting a credential or refreshing TTL. Because lookup accepts no provider set, explicit-session lookup considers matching session/model bindings across mixed scopes and returns `ambiguous` if they identify different credentials after any caller-supplied auth filtering. Lookup validates the complete namespace head before accepting a session/model suffix, rejecting cross-session matches from identifiers containing key separators. Scope syntax is recognized only for the mixed namespace; brackets in a plain provider name remain part of that name.
 
 ### Failover and provider-set changes
 
@@ -52,7 +56,7 @@ An unavailable bound credential triggers fallback selection across eligible prov
 
 Existing retryable-status, cooldown, priority, model-support, and streaming retry boundaries remain authoritative. Provider-equal selection does not add replay after streamed output begins. Invalid client requests retain their existing non-retryable handling.
 
-A recovered provider can participate in new selections without preempting an existing healthy session binding. Removing a provider prevents its credentials from being reused when they are no longer candidates for the route.
+A recovered credential can participate in new selections without preempting an existing healthy session binding within the same scope. Temporary cooldowns and tried-credential filtering do not themselves change the route's provider set. Adding or removing a route provider follows the binding-scope rules above.
 
 ## Configuration
 
@@ -69,6 +73,8 @@ Regression coverage is split by behavior:
 - [scheduler_provider_equal_test.go](../../sdk/cliproxy/auth/scheduler_provider_equal_test.go): unequal credential counts, provider/model cursor scoping, canonical provider order, priority exclusion, and fill-first provider ordering.
 - [selector_provider_equal_test.go](../../sdk/cliproxy/auth/selector_provider_equal_test.go): legacy provider equality, provider-equal affinity fallback, and preservation of other strategies.
 - [selector_provider_equal_manager_test.go](../../sdk/cliproxy/auth/selector_provider_equal_manager_test.go): manager-owned selector lifetime and preservation of weighted and fill-first affinity fallbacks.
+- [session_affinity_provider_set_test.go](../../sdk/cliproxy/auth/session_affinity_provider_set_test.go): canonical provider-set namespaces, scoped mixed bindings and lookup, rejection of cross-session lookup matches from crafted session identifiers, and consistent LCP namespace construction and parsing.
+- [provider_set_scope_encoding_test.go](../../sdk/cliproxy/auth/provider_set_scope_encoding_test.go): distinct scopes for delimiter-containing provider names, structural-character encoding, preservation of brackets in plain provider names, and stable LCP namespaces for already-scoped providers.
 
 ### Live smoke test
 
@@ -77,11 +83,11 @@ With two providers enabled at the same priority and exposing the same alias, ena
 1. Confirm the model catalog lists the alias once.
 2. Send requests under two distinct session IDs and observe different providers.
 3. Repeat each session and observe the same credential.
-4. Disable one provider and confirm subsequent requests can use the remaining provider under the configured retry and rebinding rules.
-5. Re-enable it and confirm new sessions distribute across both providers while existing healthy bindings remain stable.
+4. Remove one provider from the route and confirm subsequent requests use the remaining provider without reusing the old mixed-route binding.
+5. Restore the original provider set and confirm new sessions distribute across both providers. A session may reuse its original binding if it is still live and eligible; it need not retain the credential selected while the provider was absent.
 
 Inspect binding decisions through the [routing transition API](../management-api-v8.md#routing-transitions). Use debug logs or routing metadata for the provider that actually served a request when a binding is preserved during temporary fallback. This is a manual verification procedure, not a claim that a live smoke test has run.
 
 ## Deferred Design Work
 
-Provider-set-scoped affinity keys and same-provider-first failover remain deferred. Routing transition observability is documented in the [v8 Management API reference](../management-api-v8.md#routing-transitions); the regression files above cover provider-equal selection.
+Same-provider-first failover and dedicated Prometheus counters remain deferred and would require separate changes. The regression files above cover provider-equal selection and provider-set-scoped affinity; they do not claim to verify these deferred extensions. Routing transition observability is documented in the [v8 Management API reference](../management-api-v8.md#routing-transitions). Existing session-affinity logs remain available.

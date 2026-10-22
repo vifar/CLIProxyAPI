@@ -190,17 +190,15 @@ oauth-excluded-models:
 `routing.strategy: round-robin` uses the provider-equal selection policy in the
 [routing guide](docs/routing/provider-equal-mixed-round-robin.md).
 `routing.session-affinity: true` keeps an identified session bound to its
-provider and credential while that credential remains eligible. Unavailability
+provider and credential within the [binding scope](docs/routing/provider-equal-mixed-round-robin.md#session-affinity)
+while that credential remains eligible. Unavailability
 uses the existing retry and rebinding policy.
 `routing.session-affinity-ttl: 1h` retains that binding for one hour of inactivity;
 using the binding refreshes its TTL. The duration accepts Go duration strings.
 These are the **shipped file's defaults**: omitting the affinity setting from
 another configuration leaves it off.
 
-Provider-set scoping is supplied by
-[pending PR #4](https://github.com/vifar/CLIProxyAPI/pull/4); when it lands, these
-same settings apply within each provider-set scope. The routing guide owns the
-current binding scopes and failover rules.
+See the routing guide for [failover rules](docs/routing/provider-equal-mixed-round-robin.md#failover-and-provider-set-changes).
 
 Use `oauth-excluded-models` directly for OAuth/file-backed model exclusions;
 `"*"` excludes all models covered by a list. For per-credential overrides, see
