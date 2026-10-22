@@ -281,10 +281,8 @@ type blockingHTTPInterruptExecutor struct {
 // waitCanceled reports whether the upstream was canceled, waiting for the
 // cancellation to be delivered.
 //
-// The interrupt event is sent before the upstream context is canceled, so a
-// test that samples the flag as soon as it has read the event can observe the
-// cancellation before it has happened. That is what made this test
-// load-sensitive.
+// The interrupt event is sent before the upstream context is canceled, so
+// reading the event does not guarantee that the executor has observed cancellation.
 func (e *blockingHTTPInterruptExecutor) waitCanceled(timeout time.Duration) bool {
 	if e.canceled.Load() {
 		return true

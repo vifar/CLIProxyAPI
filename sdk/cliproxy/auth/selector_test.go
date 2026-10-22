@@ -2065,23 +2065,21 @@ func TestSessionCache_GetAndRefresh(t *testing.T) {
 		t.Fatalf("GetAndRefresh() = %q, %v, want auth1, true", got, ok)
 	}
 
-	// Wait half TTL and access again (should refresh)
+	// Advance half the TTL and access again (should refresh).
 	now.Add(int64(ttl / 2))
 	got, ok = cache.GetAndRefresh("session1")
 	if !ok || got != "auth1" {
 		t.Fatalf("GetAndRefresh() after half the TTL = %q, %v, want auth1, true", got, ok)
 	}
 
-	// Wait another half TTL (a full TTL from the original, but the TTL was
-	// refreshed at the access above).
-	// Entry should still be valid because TTL was refreshed
+	// At the original expiry, the entry remains valid because access refreshed it.
 	now.Add(int64(ttl / 2))
 	got, ok = cache.GetAndRefresh("session1")
 	if !ok || got != "auth1" {
 		t.Fatalf("GetAndRefresh() after refresh = %q, %v, want auth1, true (TTL should have been refreshed)", got, ok)
 	}
 
-	// Now wait full TTL without access
+	// Advance a full TTL without access to reach the refreshed expiry.
 	now.Add(int64(ttl))
 	got, ok = cache.GetAndRefresh("session1")
 	if ok {

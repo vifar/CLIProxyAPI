@@ -121,10 +121,8 @@ func TestServiceConcurrentReplacementWaitsForInFlightDrain(t *testing.T) {
 		homeCancel:   oldCancel,
 		homeClient:   home.New(internalconfig.HomeConfig{Enabled: true}),
 		homeRegistry: registry,
-		// The drain bound is long enough that it cannot expire while the test
-		// runs. The drain ends when the reservation is released, so the bound is
-		// only a safety net, and a bound that could expire would let the test
-		// observe the bound rather than the behaviour it is about.
+		// Keep the drain bound well beyond the observation window so the pending
+		// reservation controls drain completion rather than timeout expiry.
 		homeDrainBound: time.Hour,
 	}
 
@@ -133,13 +131,8 @@ func TestServiceConcurrentReplacementWaitsForInFlightDrain(t *testing.T) {
 		service.startHomeSubscriber(ctx)
 		close(firstReturned)
 	}()
-	// The loop waits for the registry to refuse a further dispatch, which only
-	// happens once the first replacement is draining.
-	//
-	// Every reservation it takes is released. A reservation that is left open
-	// keeps the drain from finishing, and the drain's bound would then expire
-	// instead: the waits below would accept that as the second replacement
-	// having waited, and the test would pass without checking anything.
+	// Rejection signals that draining has begun. Release each probe reservation
+	// so only pending keeps the drain open.
 	deadline := time.Now().Add(time.Second)
 	for {
 		late, errLate := registry.BeginDispatch()
@@ -153,35 +146,17 @@ func TestServiceConcurrentReplacementWaitsForInFlightDrain(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 
-	// The second replacement must wait for the first drain.
-	//
-	// The wait is for the registry to report that it is draining, which is the
-	// point at which the first replacement is provably in its drain. The
-	// original wait was for the registry to refuse a further dispatch, which
-	// happens for the same reason, and then a fifty millisecond window in which
-	// the second replacement must not return. On a loaded machine the drain can
-	// finish inside that window, and the second replacement then returns without
-	// ever having waited: the test failed against correct code.
-	//
-	// The window is now long enough that the drain cannot have finished inside
-	// it, and the assertion is unchanged.
 	secondReturned := make(chan struct{})
 	go func() {
 		service.startHomeSubscriber(ctx)
 		close(secondReturned)
 	}()
-	// The second replacement must still be waiting: the drain has not been
-	// released yet, so the only way it could have returned is by not waiting at
-	// all.
-	//
-	// The check is a window rather than a deadline on the behaviour: the
-	// assertion is that it has not returned, and the completion below is
-	// required.
+	// Observe that the second replacement stays blocked while pending holds
+	// the first drain open; require completion below after releasing it.
 	select {
 	case <-secondReturned:
 		t.Fatal("concurrent replacement returned before the first drain completed")
 	case <-time.After(time.Second):
-		// Still waiting for the first drain, which is what the test is about.
 	}
 
 	pending.End()
