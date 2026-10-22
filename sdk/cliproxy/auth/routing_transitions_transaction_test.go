@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -534,4 +535,98 @@ func TestRoutingTransitionChildRetryFindsItsOwnAttribution(t *testing.T) {
 	if last.PreviousProvider != providerA {
 		t.Fatalf("previous provider = %q, want %q: %+v", last.PreviousProvider, providerA, last)
 	}
+}
+
+// TestRoutingTransitionRefreshingTheProviderAttributionKeepsTheOthers asserts
+// that a refresh does not drop the attribution of another credential.
+//
+// The map of remembered providers is bounded. A refresh of a credential that is
+// already remembered must not make room, because making room would drop an
+// unrelated credential's attribution, and a failure of that credential could
+// then no longer be attributed to its provider.
+func TestRoutingTransitionRefreshingTheProviderAttributionKeepsTheOthers(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Hour,
+	})
+	t.Cleanup(selector.Stop)
+
+	state := selector.affinityState
+	if state == nil {
+		t.Fatal("the affinity state must exist")
+	}
+
+	// The map is full.
+	selector.withAffinityState(func(state *sessionAffinityState) {
+		for i := 0; i < maxBoundProviderEntries; i++ {
+			state.boundProviders[authIDForIndex(i)] = "rt-provider"
+		}
+		if len(state.boundProviders) != maxBoundProviderEntries {
+			t.Fatalf("the map holds %d entries, want %d", len(state.boundProviders), maxBoundProviderEntries)
+		}
+	})
+
+	// Refreshing a credential that is already remembered keeps the others.
+	selector.withAffinityState(func(state *sessionAffinityState) {
+		selector.rememberBoundProviderLocked(state, authIDForIndex(0), "rt-provider-a")
+	})
+	selector.withAffinityState(func(state *sessionAffinityState) {
+		if len(state.boundProviders) != maxBoundProviderEntries {
+			t.Fatalf("the map holds %d entries, want %d", len(state.boundProviders), maxBoundProviderEntries)
+		}
+		if _, ok := state.boundProviders[authIDForIndex(maxBoundProviderEntries-1)]; !ok {
+			t.Fatal("a refresh dropped the attribution of another credential")
+		}
+	})
+}
+
+// TestRoutingTransitionRefreshingTheFailureRecordKeepsTheOthers asserts that
+// a refresh of a failure record does not drop the record of another binding.
+func TestRoutingTransitionRefreshingTheFailureRecordKeepsTheOthers(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Hour,
+	})
+	t.Cleanup(selector.Stop)
+
+	state := selector.affinityState
+	if state == nil {
+		t.Fatal("the affinity state must exist")
+	}
+
+	selector.withAffinityState(func(state *sessionAffinityState) {
+		now := time.Now()
+		for i := 0; i < maxFailedBindingEntries; i++ {
+			state.failedBindings[failedBindingKeyForIndex(i)] = failedBindingRecord{provider: "rt-provider", at: now}
+		}
+		if len(state.failedBindings) != maxFailedBindingEntries {
+			t.Fatalf("the map holds %d records, want %d", len(state.failedBindings), maxFailedBindingEntries)
+		}
+	})
+
+	selector.withAffinityState(func(state *sessionAffinityState) {
+		selector.rememberFailedBindingLocked(state, failedBindingKeyForIndex(0), "rt-provider-a")
+	})
+	selector.withAffinityState(func(state *sessionAffinityState) {
+		if len(state.failedBindings) != maxFailedBindingEntries {
+			t.Fatalf("the map holds %d records, want %d", len(state.failedBindings), maxFailedBindingEntries)
+		}
+		if _, ok := state.failedBindings[failedBindingKeyForIndex(maxFailedBindingEntries-1)]; !ok {
+			t.Fatal("a refresh dropped the record of another binding")
+		}
+	})
+}
+
+// authIDForIndex returns a distinct credential identifier.
+func authIDForIndex(index int) string {
+	return "rt-auth-" + strconv.Itoa(index)
+}
+
+// failedBindingKeyForIndex returns a distinct binding key.
+func failedBindingKeyForIndex(index int) string {
+	return "rt-binding-" + strconv.Itoa(index)
 }
