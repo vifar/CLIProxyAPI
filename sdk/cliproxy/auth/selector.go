@@ -1977,7 +1977,7 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 			// failed may be a later extension of it. The exact sequence's
 			// retained failure decides the transition, so the retry is not
 			// reported as a plain hit.
-			lcpHitFailedProvider = s.takeFailedBindingLocked(state, lcpFailedBindingKey(namespace, cliproxysession.SequenceIdentity(fingerprints)))
+			lcpHitFailedProvider = s.takeFailedBindingLocked(state, lcpFailedBindingKey(namespace, s.matcher.SequenceIdentityFor(fingerprints)))
 			if match.IsFork {
 				// A fork has a binding of its own. The matched parent supplies
 				// the credential, but the fork's sequence is bound separately,
@@ -2136,7 +2136,7 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 				}
 			}
 		}
-		lcpFailedProvider = s.takeFailedBindingLocked(state, lcpFailedBindingKey(namespace, cliproxysession.SequenceIdentity(fingerprints)))
+		lcpFailedProvider = s.takeFailedBindingLocked(state, lcpFailedBindingKey(namespace, s.matcher.SequenceIdentityFor(fingerprints)))
 		bindRes = s.matcher.BindFingerprintsWithContext(namespace, fingerprints, tailFingerprints, envDigest, minPrefixLength, bindAuthID)
 		// A preserved binding keeps its own credential, so its provider is read
 		// from the remembered state: the bound credential is not among the
@@ -2624,7 +2624,7 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 					// is the same for the selection that binds the sequence and
 					// for the removal here. The session identifier is not: it
 					// changes as the conversation grows.
-					sequenceIdentity := cliproxysession.SequenceIdentity(fingerprints)
+					sequenceIdentity := s.matcher.SequenceIdentityFor(fingerprints)
 					lcpSessionID := ""
 					if res.Options.Metadata != nil {
 						lcpSessionID = sessionMetadataString(res.Options.Metadata, cliproxyexecutor.LCPAffinitySessionIDMetadataKey)
