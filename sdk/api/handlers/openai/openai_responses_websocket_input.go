@@ -23,12 +23,9 @@ import (
 // does not use it; that interrupt is written to the existing socket instead.
 type responsesLocalInterrupt struct {
 	mu sync.Mutex
-	// active tells whether an HTTP turn is in flight.
+	// active is cleared before forwarding a terminal event or on cleanup.
 	active bool
-	// activeResponseID is the response that is in flight. An interrupt names
-	// a response, and only the response that is running may be interrupted:
-	// an interrupt for a response that already completed would report an
-	// incomplete response for it and cancel the response that is running.
+	// activeResponseID is supplied by response.created; see deliver for matching rules.
 	activeResponseID string
 	frames           chan []byte
 }
@@ -49,8 +46,6 @@ func (s *responsesLocalInterrupt) begin() {
 	s.mu.Unlock()
 }
 
-// setResponseID records the response that is in flight, so an interrupt for
-// another response is not delivered to it.
 func (s *responsesLocalInterrupt) setResponseID(responseID string) {
 	if s == nil {
 		return
@@ -78,6 +73,11 @@ func (s *responsesLocalInterrupt) end() {
 	s.mu.Unlock()
 }
 
+// deliver accepts interrupts only while the turn is active. Once response.created
+// supplies an ID, an interrupt naming another response is rejected so it cannot
+// cancel the current response on behalf of a completed one. Before creation,
+// turn-level interruption remains allowed without matching an ID; see
+// TestResponsesLocalInterruptOnlyReachesTheActiveResponse.
 func (s *responsesLocalInterrupt) deliver(payload []byte) bool {
 	if s == nil {
 		return false
@@ -87,10 +87,6 @@ func (s *responsesLocalInterrupt) deliver(payload []byte) bool {
 	if !s.active {
 		return false
 	}
-	// The interrupt must name the response that is in flight. An interrupt for
-	// a response that already completed is not delivered: answering it would
-	// report an incomplete response for a finished one and cancel the response
-	// that is running.
 	if interruptID := responsesInterruptResponseID(payload); interruptID != "" && s.activeResponseID != "" && interruptID != s.activeResponseID {
 		return false
 	}
