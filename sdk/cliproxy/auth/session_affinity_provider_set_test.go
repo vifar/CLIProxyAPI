@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -306,6 +307,46 @@ func TestLCPAffinityNamespaceCarriesTheProviderSetScope(t *testing.T) {
 	}
 	if callerScope != "caller-1" {
 		t.Fatalf("caller scope = %q, want caller-1", callerScope)
+	}
+}
+
+// TestSessionAffinityScopedLookupFollowsTheCacheClock asserts that the scoped
+// lookup expires a binding exactly when a plain lookup does.
+//
+// The scoped lookup reads every binding in one pass, so it has its own
+// expiration check. It must use the cache's own clock: with the wall clock it
+// would return a binding that the plain lookup has already expired, and the
+// lookup would report an expired binding as bound.
+func TestSessionAffinityScopedLookupFollowsTheCacheClock(t *testing.T) {
+	t.Parallel()
+
+	cache := NewSessionCache(time.Minute)
+	defer cache.Stop()
+
+	var now atomic.Int64
+	start := time.Date(2100, time.January, 1, 0, 0, 0, 0, time.UTC)
+	now.Store(start.UnixNano())
+	cache.SetClock(func() time.Time { return time.Unix(0, now.Load()) })
+
+	cache.Set("mixed[a,b]::header:s1::model-1", "auth-1")
+
+	found := cache.GetByScopeSuffixes("mixed", []string{"::header:s1::model-1"})
+	if len(found) != 1 {
+		t.Fatalf("found = %v, want the live binding", found)
+	}
+
+	// The binding's lifetime is over.
+	now.Add(int64(time.Minute))
+
+	// The scoped lookup is checked first: a plain lookup removes the expired
+	// entry, and then the scoped lookup would find nothing for the wrong
+	// reason.
+	found = cache.GetByScopeSuffixes("mixed", []string{"::header:s1::model-1"})
+	if len(found) != 0 {
+		t.Fatalf("found = %v, want no binding after the expiry", found)
+	}
+	if _, ok := cache.Get("mixed[a,b]::header:s1::model-1"); ok {
+		t.Fatal("the binding is still live for a plain lookup")
 	}
 }
 

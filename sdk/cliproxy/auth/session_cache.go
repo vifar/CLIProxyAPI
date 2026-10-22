@@ -190,7 +190,9 @@ func (c *SessionCache) GetByScopeSuffixes(namespace string, suffixes []string) m
 	if c.entries == nil {
 		return nil
 	}
-	now := time.Now()
+	// The cache's own clock decides the expiration, so a scoped lookup and a
+	// plain lookup agree on which bindings are still alive.
+	now := c.nowTime()
 	found := make(map[string]struct{})
 	for key, entry := range c.entries {
 		if entry.authID == "" {
