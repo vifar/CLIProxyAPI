@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -2043,8 +2044,18 @@ func TestSessionAffinitySelector_CrossProviderIsolation(t *testing.T) {
 func TestSessionCache_GetAndRefresh(t *testing.T) {
 	t.Parallel()
 
-	cache := NewSessionCache(100 * time.Millisecond)
+	// The clock is controlled, so the test does not sleep. A real sleep makes
+	// the result depend on the machine's load: a loaded one can resume after
+	// the entry has expired, and the test then fails against correct code.
+	const ttl = time.Minute
+	cache := NewSessionCache(ttl)
 	defer cache.Stop()
+
+	// The clock is shared with the cache's cleanup goroutine, so it is
+	// accessed atomically.
+	var now atomic.Int64
+	now.Store(time.Now().UnixNano())
+	cache.SetClock(func() time.Time { return time.Unix(0, now.Load()) })
 
 	cache.Set("session1", "auth1")
 
@@ -2054,23 +2065,22 @@ func TestSessionCache_GetAndRefresh(t *testing.T) {
 		t.Fatalf("GetAndRefresh() = %q, %v, want auth1, true", got, ok)
 	}
 
-	// Wait half TTL and access again (should refresh)
-	time.Sleep(60 * time.Millisecond)
+	// Advance half the TTL and access again (should refresh).
+	now.Add(int64(ttl / 2))
 	got, ok = cache.GetAndRefresh("session1")
 	if !ok || got != "auth1" {
-		t.Fatalf("GetAndRefresh() after 60ms = %q, %v, want auth1, true", got, ok)
+		t.Fatalf("GetAndRefresh() after half the TTL = %q, %v, want auth1, true", got, ok)
 	}
 
-	// Wait another 60ms (total 120ms from original, but TTL refreshed at 60ms)
-	// Entry should still be valid because TTL was refreshed
-	time.Sleep(60 * time.Millisecond)
+	// At the original expiry, the entry remains valid because access refreshed it.
+	now.Add(int64(ttl / 2))
 	got, ok = cache.GetAndRefresh("session1")
 	if !ok || got != "auth1" {
 		t.Fatalf("GetAndRefresh() after refresh = %q, %v, want auth1, true (TTL should have been refreshed)", got, ok)
 	}
 
-	// Now wait full TTL without access
-	time.Sleep(110 * time.Millisecond)
+	// Advance a full TTL without access to reach the refreshed expiry.
+	now.Add(int64(ttl))
 	got, ok = cache.GetAndRefresh("session1")
 	if ok {
 		t.Fatalf("GetAndRefresh() after expiry = %q, %v, want '', false", got, ok)
