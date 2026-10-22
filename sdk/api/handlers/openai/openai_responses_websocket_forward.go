@@ -200,6 +200,11 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 					// reason "interrupted", to acknowledge response.interrupt. Closing
 					// the client socket here would block the follow-up request.
 					completed = true
+					// Stop accepting local interrupts before the client can observe
+					// the terminal event; a later interrupt is for a finished
+					// response, and answering it would report an incomplete
+					// response for one that already completed.
+					opts.localInterrupt.end()
 					completedOutput = responseCompletedOutputFromPayload(payloads[i], outputItemsByIndex, outputItemsFallback)
 					completedResponseID = responseCompletedIDFromPayload(payloads[i])
 				}
