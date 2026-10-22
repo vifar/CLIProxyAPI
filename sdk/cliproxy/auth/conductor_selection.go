@@ -1682,6 +1682,66 @@ func canonicalSchedulingProvider(key string) string {
 	}
 }
 
+// canonicalProviderSetScope renders an eligible provider set as a stable scope
+// string for the session affinity namespace. The set is sorted so that two sets
+// that differ only in order share one scope.
+// canonicalProviderSetScope returns the scope that names an eligible provider
+// set.
+//
+// The components are encoded before they are joined, so two different sets
+// never produce the same scope: one provider named "a,b" and two providers
+// named "a" and "b" are different sets, and they must not share a scope. A
+// binding created under one set is then never reused under another one.
+//
+// The scope is carried in a cache key that is delimited by brackets, so the
+// characters that are structural there are encoded as well.
+func canonicalProviderSetScope(providerSet map[string]struct{}) string {
+	if len(providerSet) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(providerSet))
+	for key := range providerSet {
+		if key == "" {
+			continue
+		}
+		keys = append(keys, key)
+	}
+	if len(keys) == 0 {
+		return ""
+	}
+	sort.Strings(keys)
+	encoded := make([]string, 0, len(keys))
+	for _, key := range keys {
+		encoded = append(encoded, encodeProviderScopeComponent(key))
+	}
+	return strings.Join(encoded, ",")
+}
+
+// encodeProviderScopeComponent encodes one provider name for a provider-set
+// scope.
+//
+// The scope is joined with a comma and carried in a cache key that is
+// delimited by brackets and separated by colons, so those characters and the
+// percent sign itself are encoded. The encoding is unambiguous, so a scope
+// always names exactly one provider set.
+//
+// The escape is lower case, because a namespace is lower cased on some paths
+// and a scope that changed under it would address another binding.
+func encodeProviderScopeComponent(name string) string {
+	var out strings.Builder
+	out.Grow(len(name))
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '-', c == '_', c == '.':
+			out.WriteByte(c)
+		default:
+			out.WriteString(fmt.Sprintf("%%%02x", c))
+		}
+	}
+	return out.String()
+}
+
 func (m *Manager) executorLocked(provider string) (ProviderExecutor, bool) {
 	provider = strings.TrimSpace(provider)
 	if provider == "" {
@@ -2189,6 +2249,9 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 	if len(providerSet) == 0 {
 		return nil, nil, "", &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
+	// Scope the affinity binding to the canonical eligible provider set, so a
+	// binding created under one set is never reused under a different one.
+	opts.Metadata[cliproxyexecutor.SessionAffinityProviderSetMetadataKey] = canonicalProviderSetScope(providerSet)
 	pluginScheduler, schedulerAcross := m.snapshotPluginScheduler()
 
 	m.mu.RLock()
@@ -2337,6 +2400,9 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 	if len(eligibleProviders) == 0 {
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
+	// Scope the affinity binding to the canonical eligible provider set, so a
+	// binding created under one set is never reused under a different one.
+	opts.Metadata[cliproxyexecutor.SessionAffinityProviderSetMetadataKey] = canonicalProviderSetScope(seenProviders)
 	eligibility := authSelectionEligibilityForRequest(ctx, opts)
 	if strings.TrimSpace(model) != "" {
 		providerSet := make(map[string]struct{}, len(eligibleProviders))

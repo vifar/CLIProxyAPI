@@ -11,6 +11,10 @@ import (
 const (
 	maxStableSessionAliases  = 64
 	defaultMaxSessionEntries = 65536
+
+	// mixedAffinityNamespace is the namespace of a mixed-provider route. It is
+	// the only namespace that carries a provider-set scope.
+	mixedAffinityNamespace = "mixed"
 )
 
 // sessionEntry stores an auth binding, its identifier aliases, and expiration.
@@ -157,6 +161,88 @@ func (c *SessionCache) GetAndRefresh(sessionID string) (string, bool) {
 	aliases := compactSessionAliases(mergeSessionAliases([]string{sessionID}, entry.aliases...))
 	c.replaceAliasGroupsLocked(entry.authID, now.Add(c.ttl), aliases, entry)
 	return entry.authID, true
+}
+
+// GetByScopeSuffixes returns every live auth ID bound under a namespace whose scope
+// may vary, matched on one of several exact key suffixes.
+//
+// A scoped mixed binding is keyed as "<namespace>[<providers>]::<session>::<model>":
+// the provider set comes first and the session and model follow it. Matching the
+// scope as part of a literal prefix would never find those keys, because the scope
+// sits between the namespace and the suffix.
+//
+// The suffixes are matched in one pass under a read lock. A bare session identifier
+// expands into many candidate suffixes, and scanning the cache once per candidate
+// would examine the whole cache many times over while blocking session selection
+// and result updates.
+func (c *SessionCache) GetByScopeSuffixes(namespace string, suffixes []string) map[string]struct{} {
+	if c == nil || namespace == "" || len(suffixes) == 0 {
+		return nil
+	}
+	wanted := make(map[string]struct{}, len(suffixes))
+	for _, suffix := range suffixes {
+		if suffix != "" {
+			wanted[suffix] = struct{}{}
+		}
+	}
+	if len(wanted) == 0 {
+		return nil
+	}
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.entries == nil {
+		return nil
+	}
+	// The cache's own clock decides the expiration, so a scoped lookup and a
+	// plain lookup agree on which bindings are still alive.
+	now := c.nowTime()
+	found := make(map[string]struct{})
+	for key, entry := range c.entries {
+		if entry.authID == "" {
+			continue
+		}
+		if !now.Before(entry.expiresAt) {
+			continue
+		}
+		matched := false
+		for suffix := range wanted {
+			if !strings.HasSuffix(key, suffix) {
+				continue
+			}
+			head := strings.TrimSuffix(key, suffix)
+			// The head must be exactly the namespace, or the namespace followed by a
+			// closed scope. A longer head is not a namespace: a session identifier
+			// that contains the separator would otherwise make one session's key
+			// match another session's lookup.
+			if head != namespace {
+				// The scope syntax belongs to the mixed namespace. A plain
+				// provider name that contains a bracket is not a scoped
+				// namespace, and reading it as one would make a binding of one
+				// provider answer a lookup of another.
+				if namespace != mixedAffinityNamespace {
+					continue
+				}
+				if !strings.HasPrefix(head, namespace+"[") {
+					continue
+				}
+				if !strings.HasSuffix(head, "]") {
+					continue
+				}
+				// Nothing may follow the closed scope.
+				if scope := strings.TrimSuffix(strings.TrimPrefix(head, namespace+"["), "]"); strings.ContainsAny(scope, "[]") {
+					continue
+				}
+			}
+			matched = true
+			break
+		}
+		if !matched {
+			continue
+		}
+		found[entry.authID] = struct{}{}
+	}
+	return found
 }
 
 // Set binds a session to an auth ID with TTL refresh. Existing aliases for the

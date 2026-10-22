@@ -410,6 +410,29 @@ func canonicalModelKey(model string) string {
 	return modelName
 }
 
+// sessionAffinityNamespace returns the affinity namespace for a request. On a
+// mixed-provider route the namespace carries the canonical eligible provider set, so
+// the binding scope changes when the set of eligible providers changes. A
+// single-provider route keeps its plain provider namespace.
+func sessionAffinityNamespace(provider string, metadata map[string]any) string {
+	provider = strings.TrimSpace(provider)
+	if provider != mixedAffinityNamespace {
+		return provider
+	}
+	if metadata == nil {
+		return provider
+	}
+	raw, ok := metadata[cliproxyexecutor.SessionAffinityProviderSetMetadataKey].(string)
+	if !ok {
+		return provider
+	}
+	scope := strings.TrimSpace(raw)
+	if scope == "" {
+		return provider
+	}
+	return provider + "[" + scope + "]"
+}
+
 func authWebsocketsEnabled(auth *Auth) bool {
 	if auth == nil {
 		return false
@@ -1125,9 +1148,8 @@ func (s *SessionAffinitySelector) withProviderEqualFallback() *SessionAffinitySe
 // applies to cold bindings, requests without a session, and genuine bound-credential
 // failover, so the fallback selector only ever receives the highest available priority tier.
 //
-// Note: The cache key includes provider, session ID, and model to handle cases where
-// a session uses multiple models (e.g., gemini-2.5-pro and gemini-3-flash-preview)
-// that may be supported by different auth credentials, and to avoid cross-provider conflicts.
+// Session bindings use sessionAffinityNamespace to isolate routes and include the
+// model because a session can use models supported by different credentials.
 func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	entry := selectorLogEntry(ctx)
 	if opts.Metadata == nil {
@@ -1194,7 +1216,11 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	fallbackAuths := highestPriorityAuths(available)
 
 	modelKey := canonicalModelKey(model)
-	cacheKey := provider + "::" + primaryID + "::" + modelKey
+	// The affinity namespace is scoped by the canonical eligible provider set on a
+	// mixed route, so enabling or disabling a provider creates a distinct binding
+	// scope and a binding can never target a provider outside the current set.
+	namespace := sessionAffinityNamespace(provider, opts.Metadata)
+	cacheKey := namespace + "::" + primaryID + "::" + modelKey
 	isFork := false
 	if opts.Metadata != nil {
 		if forkFlag, ok := opts.Metadata[cliproxyexecutor.IsForkMetadataKey].(bool); ok && forkFlag {
@@ -1204,7 +1230,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	isSubagent := !isFork && isSubagentSession(primaryID, fallbackID)
 	fallbackKey := ""
 	if fallbackID != "" && fallbackID != primaryID {
-		fallbackKey = provider + "::" + fallbackID + "::" + modelKey
+		fallbackKey = namespace + "::" + fallbackID + "::" + modelKey
 	}
 	bind := func(authID string) {
 		if fallbackKey != "" && !isSubagent && !isFork {
@@ -1445,13 +1471,37 @@ func canonicalLCPProvider(provider string) string {
 }
 
 func lcpAffinityNamespace(provider, model string, metadata map[string]any) string {
-	provider = canonicalLCPProvider(provider)
 	model = canonicalModelKey(model)
 	callerScope := sessionMetadataString(metadata, cliproxyexecutor.CallerScopeMetadataKey)
 	if provider == "" || callerScope == "" {
 		return ""
 	}
-	return strings.Join([]string{"lcp:v1", provider, model, callerScope}, "::")
+	// The provider is canonicalized on its own, and a provider that already
+	// carries the provider-set scope keeps the scope it has. The scope carries
+	// percent escapes, and lower casing it would change the namespace and
+	// address another binding.
+	scoped := lcpScopedProvider(provider)
+	// The LCP namespace must carry the same provider-set scope as the explicit
+	// binding namespace, so selection, success, eviction and lookup all address
+	// one namespace. Without it, a mixed request with a caller scope and no
+	// explicit session would keep its original binding after a credential failure
+	// and would read an unscoped binding after the provider set changed.
+	if scoped == provider {
+		scoped = sessionAffinityNamespace(scoped, metadata)
+	}
+	return strings.Join([]string{"lcp:v1", scoped, model, callerScope}, "::")
+}
+
+// lcpScopedProvider canonicalizes a provider that carries a provider-set scope.
+//
+// The scope is kept exactly as it is. Only the provider in front of it is
+// canonicalized, so a scope that carries percent escapes is never rewritten.
+func lcpScopedProvider(provider string) string {
+	if !strings.HasPrefix(provider, mixedAffinityNamespace+"[") {
+		return canonicalLCPProvider(provider)
+	}
+	base := lcpNamespaceProvider(provider)
+	return base + provider[len(base):]
 }
 
 func parseLCPNamespace(ns string) (provider, model, callerScope string, ok bool) {
@@ -1463,6 +1513,10 @@ func parseLCPNamespace(ns string) (provider, model, callerScope string, ok bool)
 	if !found {
 		return "", "", "", false
 	}
+	// A mixed route's namespace carries the provider-set scope, so the provider
+	// segment is "mixed[<providers>]". The scope is not part of the provider
+	// identity.
+	nsProvider = lcpNamespaceProvider(nsProvider)
 	lastIdx := strings.LastIndex(rest, "::")
 	if lastIdx < 0 {
 		return nsProvider, rest, "", true
@@ -1470,6 +1524,22 @@ func parseLCPNamespace(ns string) (provider, model, callerScope string, ok bool)
 	nsModel := rest[:lastIdx]
 	nsCallerScope := rest[lastIdx+2:]
 	return nsProvider, nsModel, nsCallerScope, true
+}
+
+// lcpNamespaceProvider strips a provider-set scope from a namespace provider
+// segment, so "mixed[a,b]" reads as "mixed".
+//
+// The scope syntax belongs to the mixed namespace. A plain provider name that
+// contains a bracket is not a scoped namespace, and truncating it would read
+// one provider as another.
+func lcpNamespaceProvider(segment string) string {
+	if !strings.HasPrefix(segment, mixedAffinityNamespace+"[") {
+		return segment
+	}
+	if index := strings.Index(segment, "["); index > 0 {
+		return segment[:index]
+	}
+	return segment
 }
 
 func lcpFingerprintsFromMetadata(metadata map[string]any) ([]string, int) {
@@ -1612,6 +1682,30 @@ func (s *SessionAffinitySelector) LookupAffinity(provider, model, sessionID stri
 				foundAuths[authID] = struct{}{}
 			}
 		}
+		// A mixed-route binding is scoped by the canonical eligible provider set, so
+		// the key carries a scope suffix. Observe those bindings too.
+		if candProvider == "mixed" {
+			// A scoped mixed binding is keyed as "mixed[<providers>]::<session>::<model>":
+			// the provider set comes first, then the session and the model. The
+			// scope is therefore matched on its own, and the session and model are
+			// matched as the exact suffix.
+			//
+			// The candidate suffixes are matched in one pass. A bare session
+			// identifier expands into many candidates, and scanning the cache once
+			// per candidate would examine the whole cache many times over while
+			// blocking session selection and result updates.
+			suffixes := make([]string, 0, len(candidates))
+			for _, cand := range candidates {
+				bounded := cliproxysession.BoundSessionIdentity(cand)
+				suffixes = append(suffixes, "::"+bounded+"::"+modelKey)
+			}
+			for authID := range s.cache.GetByScopeSuffixes(candProvider, suffixes) {
+				if authFilter != nil && !authFilter(authID) {
+					continue
+				}
+				foundAuths[authID] = struct{}{}
+			}
+		}
 	}
 
 	if s.matcher != nil {
@@ -1668,6 +1762,9 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 	if raw, ok := res.Options.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey].(string); ok && raw != "" {
 		ns = raw
 	}
+	// The namespace must match the one used during selection, so it carries the
+	// same provider-set scope.
+	ns = sessionAffinityNamespace(ns, res.Options.Metadata)
 	nsModel := canonicalModelKey(res.Model)
 	if raw, ok := res.Options.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey].(string); ok && raw != "" {
 		nsModel = canonicalModelKey(raw)

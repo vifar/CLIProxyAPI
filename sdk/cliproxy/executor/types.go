@@ -78,12 +78,18 @@ const (
 	LCPMinPrefixLengthMetadataKey = "lcp_min_prefix_length"
 	// CallerScopeMetadataKey isolates inferred session identities between downstream callers.
 	CallerScopeMetadataKey = "caller_scope"
-	// SessionAffinityProviderMetadataKey carries the affinity selection namespace
-	// (provider string, e.g. the literal "mixed" pool key) used by SessionAffinitySelector.Pick,
-	// so OnResult keys the session cache identically to how selection read it.
+	// SessionAffinityProviderMetadataKey carries the route provider used by
+	// SessionAffinitySelector.Pick (e.g. the literal "mixed" pool key). OnResult
+	// combines it with SessionAffinityProviderSetMetadataKey to reconstruct the
+	// selection namespace.
 	SessionAffinityProviderMetadataKey = "session_affinity_provider"
 	// SessionAffinityModelMetadataKey carries the model used during session affinity selection.
 	SessionAffinityModelMetadataKey = "session_affinity_model"
+	// SessionAffinityProviderSetMetadataKey carries the canonical eligible provider set for a
+	// mixed-provider route. It scopes the affinity binding so that enabling or disabling a
+	// provider creates a distinct binding scope, and two provider sets that differ only in
+	// order share one scope. Empty for single-provider routes, which keep their existing key.
+	SessionAffinityProviderSetMetadataKey = "session_affinity_provider_set"
 )
 
 // Request encapsulates the translated payload that will be sent to a provider executor.
