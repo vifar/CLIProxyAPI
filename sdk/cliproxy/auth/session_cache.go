@@ -388,15 +388,15 @@ func (c *SessionCache) CompareAndDelete(sessionID, expectedAuthID string) bool {
 
 // CompareAndDeleteGroupReporting removes the whole binding a session
 // identifier belongs to, only if it still points at the expected credential, and
-// calls report with the credential it removed and the identifiers that named
-// the binding.
+// calls report with that credential and the identifiers naming the binding.
 //
 // A credential failure invalidates the binding, not one of its names. Removing
 // only the named identifier would leave the binding's other names pointing at
 // the failed credential, and a retry through one of them would reuse it.
 //
-// The report is called while the cache lock is held, so the removal and the
-// attribution it publishes are one step.
+// The report is called after checking the expected credential and before
+// removal, while the cache lock is held, so other cache users cannot observe
+// removal before attribution is published.
 //
 // The callback must not call back into the cache.
 func (c *SessionCache) CompareAndDeleteGroupReporting(sessionID, expectedAuthID string, report func(removedAuthID string, identifiers []string)) (string, bool) {

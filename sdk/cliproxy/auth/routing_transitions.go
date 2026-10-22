@@ -19,17 +19,17 @@ const (
 	// RoutingTransitionBindingCreated is emitted when a new session is bound to a
 	// provider and credential.
 	RoutingTransitionBindingCreated RoutingTransition = "binding_created"
-	// RoutingTransitionBindingHit is emitted when an existing session reuses its
-	// bound provider and credential.
+	// RoutingTransitionBindingHit includes preserved bindings during temporary
+	// fallback, even when another credential serves the request.
 	RoutingTransitionBindingHit RoutingTransition = "binding_hit"
-	// RoutingTransitionCredentialReselected is emitted when the bound credential is
-	// unavailable and another credential of the same provider is chosen.
+	// RoutingTransitionCredentialReselected reports replacement of a failed or
+	// unavailable binding within the same provider.
 	RoutingTransitionCredentialReselected RoutingTransition = "credential_reselected"
-	// RoutingTransitionProviderFailover is emitted when the bound provider has no
-	// eligible credential and another provider is chosen.
+	// RoutingTransitionProviderFailover reports a binding replacement across
+	// providers; it does not imply same-provider credentials were exhausted.
 	RoutingTransitionProviderFailover RoutingTransition = "provider_failover"
-	// RoutingTransitionNoEligibleProvider is emitted when a request cannot be
-	// routed at all.
+	// RoutingTransitionNoEligibleProvider reports an error at the manager's
+	// mixed-provider selection boundary, including Home dispatch.
 	RoutingTransitionNoEligibleProvider RoutingTransition = "no_eligible_provider"
 )
 
@@ -43,7 +43,8 @@ type RoutingTransitionEvent struct {
 	Transition RoutingTransition `json:"transition"`
 	// Model is the requested model.
 	Model string `json:"model"`
-	// Provider is the provider key the request was routed to, when one was chosen.
+	// Provider identifies the binding's provider, which may differ from the
+	// provider serving the request during temporary fallback without rebinding.
 	Provider string `json:"provider,omitempty"`
 	// PreviousProvider is the provider the session was bound to before the
 	// transition, when the transition replaced a binding.

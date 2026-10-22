@@ -80,8 +80,8 @@ With two providers enabled at the same priority and exposing the same alias, ena
 4. Disable one provider and confirm subsequent requests can use the remaining provider under the configured retry and rebinding rules.
 5. Re-enable it and confirm new sessions distribute across both providers while existing healthy bindings remain stable.
 
-Establish selected providers from existing debug logs or routing metadata, not response wording. This is a manual verification procedure, not a claim that a live smoke test has run.
+Inspect binding decisions through the [routing transition API](../management-api-v8.md#routing-transitions). Use debug logs or routing metadata for the provider that actually served a request when a binding is preserved during temporary fallback. This is a manual verification procedure, not a claim that a live smoke test has run.
 
 ## Deferred Design Work
 
-Provider-set-scoped affinity keys and dedicated routing-transition events or Prometheus counters are not implemented by this change. Existing session-affinity logs remain available. Same-provider-first failover is also not part of the delivered policy. These extensions would require separate changes; the regression files above do not claim to verify them.
+Provider-set-scoped affinity keys and same-provider-first failover remain deferred. Routing transition observability is documented in the [v8 Management API reference](../management-api-v8.md#routing-transitions); the regression files above cover provider-equal selection.

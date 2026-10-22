@@ -1154,11 +1154,9 @@ func (s *SessionAffinitySelector) Trees() *cliproxysession.InMemorySessionTreeSt
 // semantics, because the affinity selector's positive-weight filtering depends on
 // it, and a fill-first fallback keeps its credential ordering.
 //
-// The provider-equal fallback is shared with the manager rather than created here,
-// so the rotation state and the remembered bindings are the same objects the
-// original selector uses. A fresh selector per call would give it its own lazily
-// initialized maps, and the binding it remembered would not be the binding the
-// original selector's result handling saw.
+// The copy shares affinity state with the original selector, so result handling
+// sees the bindings and provider attribution recorded during selection. The
+// manager supplies a retained provider-equal fallback so rotation survives copies.
 func (s *SessionAffinitySelector) withProviderEqualFallback(providerEqual *ProviderEqualSelector) *SessionAffinitySelector {
 	if s == nil {
 		return nil
@@ -1395,10 +1393,8 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		// the provider the failed credential belonged to, and the attribution is
 		// consumed and the binding written as one step.
 		//
-		// The attribution of a failed binding is consumed once, and it is the only
-		// signal that this is a replacement. A concurrent retry that finds no
-		// attribution has a binding that was never failed, so it is a creation of
-		// a new binding rather than a second replacement.
+		// Failure attribution is consumed once. The current binding also supplies
+		// a predecessor when another request has already rebound the conversation.
 		var previousProvider string
 		var replacedAuthID string
 		s.withAffinityState(func(state *sessionAffinityState) {
@@ -2522,13 +2518,6 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 					// conversation has already rebound away from must not be
 					// recorded as a replacement.
 					//
-					// The attribution is published before the removal, so a
-					// concurrent request cannot observe the removal and bind a
-					// different credential before the attribution exists. If the
-					// removal does not happen after all, the attribution is
-					// withdrawn again, so it cannot describe a binding that is
-					// still in place.
-					//
 					// The removal and the publication are one step under the
 					// affinity state's lock. A concurrent hit that consumed the
 					// attribution before the removal would report a reselection
@@ -2607,43 +2596,17 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 		return
 	}
 
-	// The binding is removed only if it still points at the credential that failed.
-	// A late failure from a credential the session has already rebound away from
-	// must not be recorded as a replacement, so the attribution is published only
-	// after the removal is confirmed.
+	// Confirm that the binding still points at the failed credential before
+	// publishing attribution; a late failure must not describe a newer binding.
+	// Remove the whole alias group so no surviving name can reuse the failed
+	// credential. CompareAndDeleteGroupReporting owns that cache operation.
 	//
-	// The provider of the removed binding is remembered, so the retry that follows
-	// can be reported as the replacement it is, rather than as a new binding. The
-	// record is keyed by the binding's own key, so a failure for one model cannot
-	// be consumed by a request for another.
-	// The binding is removed only if it still points at the credential that failed.
-	// A late failure from a credential the session has already rebound away from
-	// must not be recorded as a replacement, so the attribution is published only
-	// after the removal is confirmed.
+	// Hold the affinity lock across removal and publication so a concurrent retry
+	// cannot bind another credential before its predecessor is recorded. Always
+	// take the affinity lock before the cache lock, as selection does.
 	//
-	// The removal and the report of what was removed happen under one lock, so
-	// a concurrent request cannot observe the removal before the attribution is
-	// published. Otherwise it could bind a different credential in between, and
-	// the attribution would describe a binding that no longer exists.
-	//
-	// The removal of the binding and the publication of its attribution are one
-	// step, under the affinity state's lock.
-	//
-	// The lock order is fixed: the affinity state's lock is taken first and the
-	// cache's lock is only ever taken inside it. A selection that binds takes
-	// them in the same order, so the two cannot deadlock.
-	//
-	// The attribution is published after the removal, and the removal is
-	// confirmed before it is: a late failure from a credential the session has
-	// already rebound away from must not be recorded as a replacement.
-	//
-	// The whole binding is removed, not one of its names. A credential failure
-	// invalidates the binding, so leaving one of the binding's identifiers
-	// pointing at the failed credential would let a retry through that
-	// identifier reuse it.
-	//
-	// The record is published under the conversation's stable identifier, the
-	// same one every consumption reads it under.
+	// Publish under the conversation's stable identifier, shared with consumption
+	// and scoped by route and model so unrelated bindings cannot consume it.
 	publicationKey := attributionKeyForBinding(cacheKey, fallbackKey, fallbackIsParent)
 	s.withAffinityState(func(state *sessionAffinityState) {
 		publishAttribution := func(removedAuthID string, identifiers []string) {
