@@ -73,7 +73,7 @@ Regression coverage is split by behavior:
 - [scheduler_provider_equal_test.go](../../sdk/cliproxy/auth/scheduler_provider_equal_test.go): unequal credential counts, provider/model cursor scoping, canonical provider order, priority exclusion, and fill-first provider ordering.
 - [selector_provider_equal_test.go](../../sdk/cliproxy/auth/selector_provider_equal_test.go): legacy provider equality, provider-equal affinity fallback, and preservation of other strategies.
 - [selector_provider_equal_manager_test.go](../../sdk/cliproxy/auth/selector_provider_equal_manager_test.go): manager-owned selector lifetime and preservation of weighted and fill-first affinity fallbacks.
-- [session_affinity_provider_set_test.go](../../sdk/cliproxy/auth/session_affinity_provider_set_test.go): canonical provider-set namespaces, scoped mixed bindings and lookup, and consistent LCP namespace construction and parsing.
+- [session_affinity_provider_set_test.go](../../sdk/cliproxy/auth/session_affinity_provider_set_test.go): canonical provider-set namespaces, scoped mixed bindings and lookup, rejection of cross-session lookup matches from crafted session identifiers, and consistent LCP namespace construction and parsing.
 
 ### Live smoke test
 
