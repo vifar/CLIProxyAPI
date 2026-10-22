@@ -143,8 +143,8 @@ func compatCatalogHTTPFetcher(ctx context.Context, endpoint, apiKey, proxyURL st
 
 // CompatCatalogModelList reads the live model list of one provider.
 //
-// The endpoint is derived from the provider's own configured base URL, so the key
-// is only ever sent to the origin it was configured for.
+// The configured HTTPS hostname selects a fixed endpoint from CompatCatalogProviders;
+// its path is ignored. This keeps the key on the configured provider's origin.
 func CompatCatalogModelList(
 	ctx context.Context,
 	baseURL string,
@@ -197,10 +197,8 @@ func CompatCatalogModelList(
 // MergeCompatCatalogModels merges a provider's live model list into its configured
 // model list.
 //
-// A configured model always wins: an explicit pin is never removed. The live list
-// only adds models the configuration does not mention, and never a model the
-// operator excluded, so a model removed through `excluded-models` does not come back
-// from the provider.
+// The merge preserves configured pins; registration applies their exclusions
+// separately. Live additions are filtered here before they reach registration.
 //
 // The configured rows are kept exactly as written, including several rows that share
 // an upstream name under different aliases: those are separate published models and
@@ -272,8 +270,6 @@ func MergeCompatCatalogModels(configured []OpenAICompatibilityModel, live []Comp
 //
 // A pattern is an exact model ID, a prefix wildcard such as "gemini-2.5-*", a
 // suffix wildcard such as "*-preview", or a substring wildcard such as "*flash*".
-// CompatCatalogModelExcluded reports whether a model ID matches one of the
-// provider's exclusion patterns.
 //
 // The model name is matched both as written and with a thinking suffix removed.
 // A client may ask for a model with a suffix such as "(high)", and the executor

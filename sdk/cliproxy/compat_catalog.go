@@ -117,9 +117,8 @@ func newCompatCatalogManager(service *Service) *compatCatalogManager {
 	}
 }
 
-// Start begins the background refresh loop. The loop is bounded: a provider that
-// cannot be read keeps its last known good list, and the configured list is always
-// the floor.
+// Start begins the background refresh loop. A provider that cannot be read keeps
+// its last known good list; exclusions still apply at registration.
 func (m *compatCatalogManager) Start(ctx context.Context) {
 	if m == nil || m.service == nil {
 		return
@@ -341,11 +340,6 @@ func (m *compatCatalogManager) generationOf() uint64 {
 	return m.generation
 }
 
-// liveModelsForEntry returns the live model list of the entry with the given name,
-// base URL and key.
-//
-// The key is part of the match, so a rotated key does not find the catalog the
-// previous key discovered.
 // liveModelsForEntry returns the live model list of the configured entry.
 //
 // The entry's full identity is matched: its position in the configuration, its
@@ -392,16 +386,8 @@ func (m *compatCatalogManager) publishLiveModels(ctx context.Context) {
 // The entry is a copy, so the configuration the operator wrote is never changed:
 // a discovered row belongs to the runtime, and writing it back would turn it into
 // a permanent pin the live list could never take back.
-// modelsFor returns a copy of a provider entry whose model list also carries the
-// models its live model list contributed.
 //
-// The entry is a copy, so the configuration the operator wrote is never changed:
-// a discovered row belongs to the runtime, and writing it back would turn it into
-// a permanent pin the live list could never take back.
-//
-// The entry's position in the configuration identifies it. The position is
-// negative when the caller does not know it, and the lookup then falls back to
-// the name, the base URL, the key and the proxy.
+// The entry's position is part of the exact identity matched by liveModelsForEntry.
 func (m *compatCatalogManager) modelsFor(entryIndex int, compat *config.OpenAICompatibility, proxyURL string) *config.OpenAICompatibility {
 	if m == nil || compat == nil {
 		return compat

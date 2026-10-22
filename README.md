@@ -152,12 +152,10 @@ CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
 The repository ships [config.yaml](config.yaml), ready to start on
 `127.0.0.1:8318` with the fork's session-sticky defaults and no credentials.
 It carries the Ollama Cloud, OpenRouter and Vercel AI Gateway entries and model
-pins from the [compatible-provider guide introduced by PR #11](https://github.com/vifar/CLIProxyAPI/blob/e6268a0a3edeec5e12f28b8ebd4ed4ab4a8d1394/docs/compatible-providers.md).
-That guide owns the provider reference; this section explains starting the fork.
-The root file uses static model pins; it does not query provider catalogs or
-establish live model availability. The guide's live model refresh and
-compatible-provider `excluded-models` extension are part of
-[pending PR #8](https://github.com/vifar/CLIProxyAPI/pull/8).
+pins described in the [compatible-provider guide](docs/compatible-providers.md).
+That guide owns the live catalog and provider exclusion rules; this section
+explains starting the fork. Enabled supported providers supplement their pins
+with a live model list in the background.
 
 Start from the repository root with `go run ./cmd/server --config config.yaml`.
 The providers start **disabled**, with empty `api-key-entries`; upstream requests
@@ -205,9 +203,9 @@ Use `oauth-excluded-models` directly for OAuth/file-backed model exclusions;
 the OAuth exclusion rules in [config.example.yaml](config.example.yaml).
 There is no app-side inclusion-list inversion in this fork. Unknown YAML keys
 can be ignored by the loader, so spelling an inclusion key does not enable it.
-These exclusions do not filter the compatible API-key providers; their pinned
-models are configured in `openai-compatibility`.
-[config.example.yaml](config.example.yaml) remains the full upstream reference.
+Compatible API-key providers use their own
+[`excluded-models` rules](docs/compatible-providers.md#excluding-a-model).
+[config.example.yaml](config.example.yaml) remains the full configuration reference.
 
 ## Management API
 

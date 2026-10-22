@@ -13,8 +13,11 @@ of the configuration.
 | OpenRouter | `https://openrouter.ai/api/v1` | `https://openrouter.ai/api/v1/models` | no | yes |
 | Vercel AI Gateway | `https://ai-gateway.vercel.sh/v1` | `https://ai-gateway.vercel.sh/v1/models` | no | yes |
 
-A provider whose base URL is not one of these is never queried. It keeps exactly
-the model list written in the configuration.
+Discovery selects enabled entries by the hostname in `base-url`, regardless of
+the entry's `name` or URL path, and uses the fixed model-list endpoint above.
+The URL must use HTTPS, without userinfo, an explicit port, a query or a fragment.
+Other hosts are never queried for discovery; their configured models still obey
+the provider's exclusions. Redirects are not followed.
 
 ### Ollama Cloud
 
@@ -31,14 +34,11 @@ openai-compatibility:
         alias: deepseek-v4.1-flash
 ```
 
-**DeepSeek V4 Flash is the stable default.** `deepseek-v4.1-flash` is the alias the
-fork's own configuration serves first, and the live list adds the newer
-`deepseek-v4-flash` and `deepseek-v4-pro` beside it. The alias is what a client
-asks for; the name is what the upstream serves. Keeping them separate is what lets
-a model be renamed upstream without breaking a client's alias.
-
-**Kimi K3** is one of the provider's models and is listed in the fork's
-configuration, so it is served whether or not the live list has been read yet.
+See the [root configuration](../config.yaml) for the shipped model pins. A pin is
+published when the provider is enabled unless excluded, whether or not discovery
+has completed; it does not verify upstream availability. The alias is what a
+client asks for; the name is what the upstream serves. Keeping them separate lets
+an operator change the upstream name without breaking a client's alias.
 
 ### OpenRouter
 
@@ -75,23 +75,30 @@ openai-compatibility:
 
 ## The model list rules
 
-The configured list is always the floor.
+The configured list, after exclusions, is the fallback.
 
-1. A model written in the configuration is **never removed**. An explicit pin
-   keeps its alias and its metadata.
-2. A model listed in `excluded-models` is **never added**, so a model removed on
-   purpose does not come back from the provider.
-3. The live list only **adds** models the configuration does not mention.
+1. Discovery preserves configured rows, aliases and metadata even when the
+   provider stops listing them. Provider exclusions take precedence over pins.
+2. The latest successful live list contributes model IDs the configuration does
+   not already name or reserve as public aliases. Live metadata is not imported;
+   added models use their ID as both name and alias.
+3. A model contributed only by discovery disappears when a later successful list
+   omits it. Discovery never writes models back to the configuration file.
 4. The merge is deterministic: configured models keep their order, and added live
    models follow in the order the provider reported them.
 
-The live read runs in the background. The proxy starts with the configured list and
-never waits for a provider, so an unreachable provider cannot stop it becoming
-ready. A failed refresh keeps the last known good list.
+The first read runs in the background at startup, with refreshes every three
+hours. Startup uses the configured fallback and never waits for a provider.
+Each provider entry refreshes independently, with at most one read in flight.
+A failed refresh, including an empty or invalid response, keeps the last known
+good list for that entry. Live lists are held in memory, so a restart starts from
+the configured fallback again. `--local-model` controls the separate model
+metadata catalogs and does not disable these provider reads.
 
 ## Excluding a model
 
-`excluded-models` takes an exact model ID or a wildcard:
+Set `excluded-models` on the `openai-compatibility` provider entry. It takes an
+exact upstream model ID or a wildcard, matched without regard to case:
 
 ```yaml
 excluded-models:
@@ -101,7 +108,11 @@ excluded-models:
   - "*flash*"           # substring
 ```
 
-The exclusion applies to the configured list and to the live list alike.
+The exclusion applies to configured and live models alike. For configured rows,
+it matches the upstream `name` (or `alias` when no name is set), so excluding an
+upstream also removes its configured aliases and its rows from shared alias
+pools. Matching also checks the name with a thinking suffix such as `(high)`
+removed. `"*"` excludes all models for that entry.
 
 ## Multiple keys
 
@@ -118,6 +129,12 @@ openai-compatibility:
 ```
 
 Each key can carry its own `weight` and `proxy-url`.
+
+Discovery uses the first nonempty API key and that key's `proxy-url`, falling back
+to the global proxy. Its live list is shared by the entry's credentials. Changing
+the entry's position, name, base URL, discovery key or effective proxy prevents
+reuse of the old list; the configured fallback applies until the next successful
+refresh for the new identity.
 
 ## Session-sticky round robin
 
@@ -157,7 +174,7 @@ A `"*"` entry excludes every model for that provider.
 
 ## Where the configuration lives
 
-- `config.example.yaml` — the upstream reference, with every key documented.
+- `config.example.yaml` — the full configuration reference.
 - `examples/compatible-providers/config.yaml` — a working configuration for these
   providers, with placeholder keys and the routing defaults above.
 - `config.yaml` in the repository root — the fork's own configuration, without
