@@ -108,6 +108,9 @@ type Service struct {
 	// wsGateway manages websocket Gemini providers.
 	wsGateway *wsrelay.Manager
 
+	// compatCatalog keeps the live model lists of OpenAI-compatible providers.
+	compatCatalog *compatCatalogManager
+
 	homeLifecycleMu              sync.Mutex
 	homeOwnershipMu              sync.Mutex
 	homeConfigCommitMu           sync.Mutex

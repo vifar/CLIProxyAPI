@@ -934,6 +934,13 @@ type OpenAICompatibility struct {
 	// Models defines the model configurations including aliases for routing.
 	Models []OpenAICompatibilityModel `yaml:"models" json:"models"`
 
+	// ExcludedModels lists model IDs that must not be served by this provider.
+	// The value may be an exact model ID, a prefix wildcard such as "gemini-2.5-*",
+	// a suffix wildcard such as "*-preview", or a substring wildcard such as
+	// "*flash*". Excluded models are also kept out of a provider's live model
+	// list, so a model removed this way does not come back from the provider.
+	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
+
 	// Headers optionally adds extra HTTP headers for requests sent to this provider.
 	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
 

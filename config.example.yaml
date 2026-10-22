@@ -895,7 +895,7 @@ upstream:
 #           proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
 #           # proxy-url: "direct" # optional: explicit direct connect for this credential
 #         - api-key: "sk-or-v1-...b781" # without proxy-url
-#       models: # The models supported by the provider.
+#       models: # Configured model pins; see docs/compatible-providers.md for live discovery.
 #         - name: "moonshotai/kimi-k2:free" # The actual model name.
 #           alias: "kimi-k2"               # The alias used in the API.
 #           display-name: "Kimi K2"         # optional catalog display name
@@ -918,6 +918,17 @@ upstream:
 #           alias: "claude-opus-4.66"
 #         - name: "kimi-k2.5"
 #           alias: "claude-opus-4.66"
+#
+#       # Exclude upstream model IDs, including configured pins. Use an exact ID,
+#       # a prefix wildcard ("gemini-2.5-*"), a suffix wildcard ("*-preview"), or a
+#       # substring wildcard ("*flash*"). See docs/compatible-providers.md for
+#       # alias matching and live discovery rules.
+#       excluded-models:
+#         - "some-model-to-hide"
+#         - "*-preview"
+
+#       # Live discovery: supported providers, refresh and merge behavior are
+#       # documented in docs/compatible-providers.md.
 
 # END API KEY EXAMPLES
 

@@ -9,6 +9,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/modelconfig"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
@@ -79,7 +80,17 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 			excluded = strings.Split(val, ",")
 		}
 	}
-	if handled, published := s.tryRegisterPluginModelsForAuthWithConfigFenced(ctx, cfg, a, fence, provider, authKind, excluded); handled {
+	// The compatible provider's own exclusions apply to the models a plugin
+	// publishes for it. The plugin path returns before the configured rows are
+	// filtered, so without this an excluded model would still be published and a
+	// request could route to it.
+	var providerExcluded []string
+	if compatDetected {
+		if entry := resolveCompatConfigEntry(cfg, a); entry != nil {
+			providerExcluded = entry.ExcludedModels
+		}
+	}
+	if handled, published := s.tryRegisterPluginModelsForAuthWithProviderExclusions(ctx, cfg, a, fence, provider, authKind, excluded, providerExcluded); handled {
 		return published
 	}
 	if ctx.Err() != nil {
@@ -249,20 +260,33 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 					isCompatAuth = true
 				}
 			}
-			registerCompat := func(compat *config.OpenAICompatibility) bool {
+			registerCompat := func(entryIndex int, compat *config.OpenAICompatibility) bool {
 				if compat == nil || compat.Disabled {
 					return false
 				}
 				isCompatAuth = true
-				ms := buildOpenAICompatibilityConfigModels(compat)
+				// The exclusions are applied against the upstream model name inside
+				// buildOpenAICompatibilityConfigModels. A second pass here would
+				// filter the public alias instead, which would drop a model whose
+				// alias happens to match an excluded name.
+				//
+				// The models a provider's live model list contributed are merged in
+				// here, at the registration boundary, rather than in the
+				// configuration. The configuration is the operator's, and a
+				// discovered row written back to it would become a permanent pin.
+				ms := buildOpenAICompatibilityConfigModels(s.compatModelsFor(entryIndex, compat, compatCatalogEffectiveProxy(cfg, compat)))
 				if providerKey == "" {
 					providerKey = "openai-compatibility"
 				}
+				// The provider's own exclusions apply to the models a plugin
+				// publishes for it as well. Without them an excluded model
+				// would still be published, and a request could route to it.
+				compatExcluded := compat.ExcludedModels
 				if len(ms) > 0 {
-					ms = s.appendPluginModels(providerKey, ms, nil)
+					ms = s.appendPluginModelsForProvider(providerKey, ms, compatExcluded, compat)
 					published = s.registerResolvedModelsForAuthFenced(a, fence, providerKey, applyModelPrefixes(ms, a.Prefix, cfg.ForceModelPrefix))
 				} else {
-					ms = s.appendPluginModels(providerKey, nil, nil)
+					ms = s.appendPluginModelsForProvider(providerKey, nil, compatExcluded, compat)
 					if len(ms) > 0 {
 						published = s.registerResolvedModelsForAuthFenced(a, fence, providerKey, applyModelPrefixes(ms, a.Prefix, cfg.ForceModelPrefix))
 					} else {
@@ -271,7 +295,7 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 				}
 				return true
 			}
-			if compatCache != nil && compatCache.cfg == cfg {
+			if compatCache != nil && compatCache.cfg == cfg && s.compatCatalogCacheIsCurrent(compatCache) {
 				if cached, ok := compatCache.lookup(a, compatName); ok {
 					isCompatAuth = true
 					if providerKey == "" {
@@ -281,11 +305,18 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 						providerKey = "openai-compatibility"
 					}
 					ms := cached.models
+					// The provider's own exclusions apply to the models a plugin
+					// publishes for it as well.
+					var compatExcluded []string
+					compat := resolveCompatConfigEntry(cfg, a)
+					if compat != nil {
+						compatExcluded = compat.ExcludedModels
+					}
 					if len(ms) > 0 {
-						ms = s.appendPluginModels(providerKey, ms, nil)
+						ms = s.appendPluginModelsForProvider(providerKey, ms, compatExcluded, compat)
 						published = s.registerResolvedModelsForAuthFenced(a, fence, providerKey, applyModelPrefixes(ms, a.Prefix, cfg.ForceModelPrefix))
 					} else {
-						ms = s.appendPluginModels(providerKey, nil, nil)
+						ms = s.appendPluginModelsForProvider(providerKey, nil, compatExcluded, compat)
 						if len(ms) > 0 {
 							published = s.registerResolvedModelsForAuthFenced(a, fence, providerKey, applyModelPrefixes(ms, a.Prefix, cfg.ForceModelPrefix))
 						} else {
@@ -295,12 +326,12 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 					return published
 				}
 			}
-			if indexed := configEntryForAuthIndex(a, cfg.OpenAICompatibility); indexed != nil && registerCompat(indexed) {
+			if indexed, index := configEntryForAuthIndex(a, cfg.OpenAICompatibility); indexed != nil && registerCompat(index, indexed) {
 				return published
 			}
 			for i := range cfg.OpenAICompatibility {
 				compat := &cfg.OpenAICompatibility[i]
-				if strings.EqualFold(compat.Name, compatName) && registerCompat(compat) {
+				if strings.EqualFold(compat.Name, compatName) && registerCompat(i, compat) {
 					return published
 				}
 			}
@@ -420,15 +451,20 @@ func (s *Service) latestAuthForModelRegistration(authID string) (*coreauth.Auth,
 	return auth, true
 }
 
-func configEntryForAuthIndex[T any](auth *coreauth.Auth, entries []T) *T {
+// configEntryForAuthIndex returns the configuration entry an auth was
+// synthesized from, together with its position in the configuration.
+//
+// The position identifies the entry: two entries can share a name, and the
+// position is what tells them apart.
+func configEntryForAuthIndex[T any](auth *coreauth.Auth, entries []T) (*T, int) {
 	if auth == nil || auth.AuthSourceKind() != coreauth.AuthSourceConfig || auth.Attributes == nil {
-		return nil
+		return nil, -1
 	}
 	index, errIndex := strconv.Atoi(strings.TrimSpace(auth.Attributes[coreauth.AttributeConfigIndex]))
 	if errIndex != nil || index < 0 || index >= len(entries) {
-		return nil
+		return nil, -1
 	}
-	return &entries[index]
+	return &entries[index], index
 }
 
 func (s *Service) resolveConfigClaudeKey(auth *coreauth.Auth) *config.ClaudeKey {
@@ -439,7 +475,7 @@ func resolveConfigClaudeKeyForConfig(cfg *config.Config, auth *coreauth.Auth) *c
 	if auth == nil || cfg == nil {
 		return nil
 	}
-	if entry := configEntryForAuthIndex(auth, cfg.ClaudeKey); entry != nil {
+	if entry, _ := configEntryForAuthIndex(auth, cfg.ClaudeKey); entry != nil {
 		return entry
 	}
 	var attrKey, attrBase string
@@ -507,7 +543,7 @@ func resolveConfigGeminiKeyEntryForConfig(cfg *config.Config, auth *coreauth.Aut
 	if auth == nil || cfg == nil {
 		return nil
 	}
-	if entry := configEntryForAuthIndex(auth, entries); entry != nil {
+	if entry, _ := configEntryForAuthIndex(auth, entries); entry != nil {
 		return entry
 	}
 	var attrKey, attrBase string
@@ -540,7 +576,7 @@ func resolveConfigVertexCompatKeyForConfig(cfg *config.Config, auth *coreauth.Au
 	if auth == nil || cfg == nil {
 		return nil
 	}
-	if entry := configEntryForAuthIndex(auth, cfg.VertexCompatAPIKey); entry != nil {
+	if entry, _ := configEntryForAuthIndex(auth, cfg.VertexCompatAPIKey); entry != nil {
 		return entry
 	}
 	var attrKey, attrBase string
@@ -626,7 +662,7 @@ func resolveConfigCodexStyleKey(auth *coreauth.Auth, entries []config.CodexKey, 
 		}
 		return attrBase != "" && strings.EqualFold(cfgBase, attrBase)
 	}
-	if entry := configEntryForAuthIndex(auth, entries); entry != nil && (!validateIndexCredentials || matchesCredentials(entry)) {
+	if entry, _ := configEntryForAuthIndex(auth, entries); entry != nil && (!validateIndexCredentials || matchesCredentials(entry)) {
 		return entry
 	}
 	for i := range entries {
@@ -651,6 +687,92 @@ func oauthExcludedModelsForConfig(cfg *config.Config, provider, authKind string)
 		return nil
 	}
 	return cfg.OAuthExcludedModels[providerKey]
+}
+
+// compatCatalogUpstreamIdentity returns the model identity the upstream sees.
+//
+// A model name may carry a thinking suffix in parentheses, such as "(high)", which
+// selects a reasoning effort rather than a different model. The suffix is stripped
+// before the request reaches the provider.
+func compatCatalogUpstreamIdentity(modelID string) string {
+	trimmed := strings.TrimSpace(modelID)
+	if trimmed == "" {
+		return ""
+	}
+	parsed := thinking.ParseSuffix(trimmed)
+	if !parsed.HasSuffix {
+		return trimmed
+	}
+	base := strings.TrimSpace(parsed.ModelName)
+	if base == "" {
+		return trimmed
+	}
+	return base
+}
+
+// compatPluginUpstreamNames maps the configured aliases of a provider to their
+// upstream model names.
+func compatPluginUpstreamNames(entry *config.OpenAICompatibility) map[string]string {
+	if entry == nil {
+		return nil
+	}
+	out := make(map[string]string, len(entry.Models))
+	for _, model := range entry.Models {
+		alias := strings.ToLower(strings.TrimSpace(model.Alias))
+		name := strings.ToLower(strings.TrimSpace(model.Name))
+		if alias != "" && name != "" {
+			out[alias] = name
+		}
+	}
+	return out
+}
+
+// applyCompatExcludedModels filters the models a plugin published for a
+// compatible provider.
+//
+// A plugin may publish a model under a configured alias, so the exclusion has to
+// be matched against the upstream identity that alias names. Otherwise an excluded
+// upstream is still published, and a request routed through the alias reaches it.
+func applyCompatExcludedModels(models []*ModelInfo, excluded []string, entry *config.OpenAICompatibility) []*ModelInfo {
+	if len(models) == 0 || len(excluded) == 0 {
+		return models
+	}
+	upstreams := compatPluginUpstreamNames(entry)
+	filtered := make([]*ModelInfo, 0, len(models))
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		blocked := false
+		id := strings.ToLower(strings.TrimSpace(model.ID))
+		upstream := id
+		if mapped, ok := upstreams[id]; ok {
+			upstream = mapped
+		}
+		// The executor strips a thinking suffix before sending the request
+		// upstream, so the identity that reaches the provider is the name
+		// without it. An exclusion written for that identity must match too,
+		// or an excluded model is still served.
+		//
+		// This matching belongs to the compatible providers: the shared
+		// exclusion of a native provider keeps its own behaviour.
+		for _, identity := range []string{
+			upstream,
+			compatCatalogUpstreamIdentity(upstream),
+			id,
+			compatCatalogUpstreamIdentity(id),
+		} {
+			if config.CompatCatalogModelExcluded(identity, excluded) {
+				blocked = true
+				break
+			}
+		}
+		if blocked {
+			continue
+		}
+		filtered = append(filtered, model)
+	}
+	return filtered
 }
 
 func applyExcludedModels(models []*ModelInfo, excluded []string) []*ModelInfo {
@@ -849,6 +971,116 @@ func buildConfiguredModelInfo(model modelEntry, ownedBy, modelType string, creat
 	return info
 }
 
+// compatCatalogUpstreamName returns the upstream model name of a configured model.
+// The name is what the upstream serves; the alias is what the client asks for.
+func compatCatalogUpstreamName(model config.OpenAICompatibilityModel) string {
+	if name := strings.TrimSpace(model.Name); name != "" {
+		return name
+	}
+	return strings.TrimSpace(model.Alias)
+}
+
+// compatCatalogManager returns the live model catalog manager, or nil when the
+// live model list is not in use.
+func (s *Service) compatCatalogManager() *compatCatalogManager {
+	if s == nil {
+		return nil
+	}
+	s.cfgMu.RLock()
+	defer s.cfgMu.RUnlock()
+	return s.compatCatalog
+}
+
+// compatCatalogCacheIsCurrent reports whether a registration cache still holds
+// the live model lists.
+//
+// The cache is discarded when the live lists have changed since it was built, so
+// a registration batch that started before a discovery cannot apply a stale
+// model list. The caller then resolves the live models at the moment it
+// registers, which is where they belong.
+func (s *Service) compatCatalogCacheIsCurrent(cache *openAICompatibilityRegistrationCache) bool {
+	if cache == nil {
+		return false
+	}
+	manager := s.compatCatalogManager()
+	if manager == nil {
+		// The live model list is not in use, so nothing has changed since the
+		// cache was built.
+		return true
+	}
+	return cache.catalogGeneration == manager.generationOf()
+}
+
+// refreshCompatModelRegistration re-registers the OpenAI-compatible credentials
+// that are currently registered, so the models a provider's live model list
+// contributed reach the model registry.
+//
+// Only the credentials that are already registered are re-registered. A
+// credential that a configuration change removed is not recreated from a
+// configuration snapshot, and a credential that is registered but is not
+// OpenAI-compatible is left alone.
+func (s *Service) refreshCompatModelRegistration(ctx context.Context) {
+	if s == nil || s.coreManager == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	registered := s.coreManager.List()
+	if len(registered) == 0 {
+		return
+	}
+	compatAuths := make([]*coreauth.Auth, 0, len(registered))
+	for _, auth := range registered {
+		if auth == nil || auth.Disabled {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(auth.Provider), "openai-compatibility") && !isOpenAICompatAuth(auth) {
+			continue
+		}
+		compatAuths = append(compatAuths, auth)
+	}
+	if len(compatAuths) == 0 {
+		return
+	}
+	// The registration resolves the live models for each credential at the moment
+	// it runs, so a registration batch that started before a discovery cannot
+	// apply a stale model list.
+	for _, auth := range compatAuths {
+		s.completeModelRegistrationForAuthWithCache(ctx, auth, nil)
+	}
+}
+
+// isOpenAICompatAuth reports whether an auth was synthesized from an
+// OpenAI-compatible provider entry.
+func isOpenAICompatAuth(auth *coreauth.Auth) bool {
+	if auth == nil {
+		return false
+	}
+	if auth.Attributes == nil {
+		return false
+	}
+	if _, ok := auth.Attributes["compat_name"]; ok {
+		return true
+	}
+	_, ok := auth.Attributes["provider_key"]
+	return ok
+}
+
+// compatModelsFor returns a provider entry whose model list also carries the
+// models its live model list contributed.
+//
+// The entry is a copy, so the configuration the operator wrote is never changed:
+// a discovered row belongs to the runtime, and writing it back would turn it into
+// a permanent pin the live list could never take back.
+func (s *Service) compatModelsFor(entryIndex int, compat *config.OpenAICompatibility, proxyURL string) *config.OpenAICompatibility {
+	manager := s.compatCatalogManager()
+	if manager == nil {
+		return compat
+	}
+	return manager.modelsFor(entryIndex, compat, proxyURL)
+}
+
 func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []*ModelInfo {
 	if compat == nil || len(compat.Models) == 0 {
 		return nil
@@ -857,6 +1089,12 @@ func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []
 	models := make([]*ModelInfo, 0, len(compat.Models))
 	for i := range compat.Models {
 		model := compat.Models[i]
+		// The exclusion is matched against the upstream model name, not the public
+		// alias: an alias can be anything, and the excluded model must not stay
+		// routable under a different name.
+		if config.CompatCatalogModelExcluded(compatCatalogUpstreamName(model), compat.ExcludedModels) {
+			continue
+		}
 		modelType := "openai-compatibility"
 		if model.Image {
 			modelType = registry.OpenAIImageModelType

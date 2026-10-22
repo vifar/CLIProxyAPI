@@ -1,0 +1,449 @@
+package config
+
+import (
+	"context"
+	"net/http"
+	"strings"
+	"testing"
+)
+
+func TestCompatCatalogProviderForRecognizesSupportedHosts(t *testing.T) {
+	t.Parallel()
+
+	cases := map[string]string{
+		"https://ollama.com/v1":           "ollama-cloud",
+		"https://openrouter.ai/api/v1":    "openrouter",
+		"https://ai-gateway.vercel.sh/v1": "vercel",
+	}
+	for baseURL, wantID := range cases {
+		provider := CompatCatalogProviderFor(baseURL)
+		if provider == nil {
+			t.Fatalf("CompatCatalogProviderFor(%q) = nil, want %q", baseURL, wantID)
+		}
+		if provider.ID != wantID {
+			t.Fatalf("CompatCatalogProviderFor(%q).ID = %q, want %q", baseURL, provider.ID, wantID)
+		}
+	}
+}
+
+func TestCompatCatalogProviderForRejectsUnsafeOrUnknownHosts(t *testing.T) {
+	t.Parallel()
+
+	for _, baseURL := range []string{
+		"http://ollama.com/v1",
+		"https://user@ollama.com/v1",
+		"https://ollama.com:8443/v1",
+		"https://ollama.com/v1?x=1",
+		"https://ollama.com.evil.example/v1",
+		"https://api.example.com/v1",
+		"",
+	} {
+		if got := CompatCatalogProviderFor(baseURL); got != nil {
+			t.Fatalf("CompatCatalogProviderFor(%q) = %+v, want nil", baseURL, got)
+		}
+	}
+}
+
+func TestCompatCatalogModelListReadsTheProviderList(t *testing.T) {
+	t.Parallel()
+
+	var requestedEndpoint string
+	var requestedKey string
+	fetcher := func(_ context.Context, endpoint, apiKey, _ string) ([]byte, int, error) {
+		requestedEndpoint = endpoint
+		requestedKey = apiKey
+		body := `{"data":[{"id":"deepseek-v4.1-flash","name":"DeepSeek V4.1 Flash","context_length":131072},{"id":"glm-5.3"}]}`
+		return []byte(body), http.StatusOK, nil
+	}
+
+	models, errList := CompatCatalogModelList(context.Background(), "https://ollama.com/v1", "ollama-key", "", fetcher)
+	if errList != nil {
+		t.Fatalf("CompatCatalogModelList: %v", errList)
+	}
+	if len(models) != 2 {
+		t.Fatalf("models len = %d, want 2", len(models))
+	}
+	if models[0].ID != "deepseek-v4.1-flash" {
+		t.Fatalf("models[0].ID = %q", models[0].ID)
+	}
+	if models[1].ID != "glm-5.3" {
+		t.Fatalf("models[1].ID = %q", models[1].ID)
+	}
+	if requestedEndpoint != "https://ollama.com/v1/models" {
+		t.Fatalf("endpoint = %q", requestedEndpoint)
+	}
+	if requestedKey != "ollama-key" {
+		t.Fatalf("wrong key was sent: %q", requestedKey)
+	}
+}
+
+func TestCompatCatalogModelListUsesTheProviderEndpointNotTheConfiguredPath(t *testing.T) {
+	t.Parallel()
+
+	var requestedEndpoint string
+	fetcher := func(_ context.Context, endpoint, _, _ string) ([]byte, int, error) {
+		requestedEndpoint = endpoint
+		return []byte(`{"data":[{"id":"m1"}]}`), http.StatusOK, nil
+	}
+
+	// The configured base URL carries a different path; the endpoint must be the
+	// provider's own model list endpoint, so the key only ever reaches the origin
+	// it was configured for.
+	if _, errList := CompatCatalogModelList(context.Background(), "https://openrouter.ai/api/v1", "", "", fetcher); errList != nil {
+		t.Fatalf("CompatCatalogModelList: %v", errList)
+	}
+	if requestedEndpoint != "https://openrouter.ai/api/v1/models" {
+		t.Fatalf("endpoint = %q", requestedEndpoint)
+	}
+}
+
+func TestCompatCatalogModelListRequiresAKeyWhereTheProviderNeedsOne(t *testing.T) {
+	t.Parallel()
+
+	fetcher := func(_ context.Context, _ string, _ string, _ string) ([]byte, int, error) {
+		t.Fatal("the reader must not query a provider that needs a key without one")
+		return nil, 0, nil
+	}
+	if _, errList := CompatCatalogModelList(context.Background(), "https://ollama.com/v1", "", "", fetcher); errList == nil {
+		t.Fatal("expected an error when the required key is missing")
+	}
+}
+
+func TestCompatCatalogModelListRejectsBadResponses(t *testing.T) {
+	t.Parallel()
+
+	upstreamError := func(_ context.Context, _ string, _ string, _ string) ([]byte, int, error) {
+		return []byte(`{"error":"nope"}`), http.StatusForbidden, nil
+	}
+	if _, errList := CompatCatalogModelList(context.Background(), "https://ollama.com/v1", "k", "", upstreamError); errList == nil {
+		t.Fatal("expected an error for a non-2xx response")
+	}
+
+	emptyList := func(_ context.Context, _ string, _ string, _ string) ([]byte, int, error) {
+		return []byte(`{"data":[]}`), http.StatusOK, nil
+	}
+	if _, errList := CompatCatalogModelList(context.Background(), "https://ollama.com/v1", "k", "", emptyList); errList == nil {
+		t.Fatal("expected an error for an empty model list")
+	}
+
+	malformed := func(_ context.Context, _ string, _ string, _ string) ([]byte, int, error) {
+		return []byte(`not json`), http.StatusOK, nil
+	}
+	if _, errList := CompatCatalogModelList(context.Background(), "https://ollama.com/v1", "k", "", malformed); errList == nil {
+		t.Fatal("expected an error for a malformed model list")
+	}
+}
+
+func TestCompatCatalogModelListSkipsEntriesWithoutAnID(t *testing.T) {
+	t.Parallel()
+
+	fetcher := func(_ context.Context, _ string, _ string, _ string) ([]byte, int, error) {
+		return []byte(`{"data":[{"id":""},{"id":"  "},{"id":"good"}]}`), http.StatusOK, nil
+	}
+	models, errList := CompatCatalogModelList(context.Background(), "https://ollama.com/v1", "k", "", fetcher)
+	if errList != nil {
+		t.Fatalf("CompatCatalogModelList: %v", errList)
+	}
+	if len(models) != 1 || models[0].ID != "good" {
+		t.Fatalf("models = %+v", models)
+	}
+}
+
+func TestMergeCompatCatalogModelsKeepsConfiguredModelsAndAddsLiveOnes(t *testing.T) {
+	t.Parallel()
+
+	configured := []OpenAICompatibilityModel{
+		{Name: "deepseek-v4.1-flash", Alias: "deepseek-v4.1-flash"},
+		{Name: "glm-5.3", Alias: "glm-5.3"},
+	}
+	live := []CompatCatalogModel{
+		{ID: "deepseek-v4.1-flash"},
+		{ID: "kimi-k3"},
+	}
+
+	merged := MergeCompatCatalogModels(configured, live, nil)
+	if len(merged) != 3 {
+		t.Fatalf("merged len = %d, want 3: %+v", len(merged), merged)
+	}
+	// The configured models keep their order and their identity.
+	if merged[0].Name != "deepseek-v4.1-flash" || merged[1].Name != "glm-5.3" {
+		t.Fatalf("configured models changed order or identity: %+v", merged)
+	}
+	// The live model that is new is added.
+	if merged[2].Name != "kimi-k3" || merged[2].Alias != "kimi-k3" {
+		t.Fatalf("live model not added: %+v", merged[2])
+	}
+}
+
+func TestMergeCompatCatalogModelsNeverRemovesAPinnedModel(t *testing.T) {
+	t.Parallel()
+
+	// The operator pinned a model the live list does not carry.
+	configured := []OpenAICompatibilityModel{
+		{Name: "pinned-model", Alias: "pinned-alias"},
+	}
+	live := []CompatCatalogModel{{ID: "other-model"}}
+
+	merged := MergeCompatCatalogModels(configured, live, nil)
+	if len(merged) != 2 {
+		t.Fatalf("merged len = %d, want 2: %+v", len(merged), merged)
+	}
+	if merged[0].Name != "pinned-model" || merged[0].Alias != "pinned-alias" {
+		t.Fatalf("the pinned model was changed: %+v", merged[0])
+	}
+}
+
+func TestMergeCompatCatalogModelsDoesNotResurrectAnExcludedModel(t *testing.T) {
+	t.Parallel()
+
+	// The operator excluded "gone-model". It must not come back from the live list.
+	configured := []OpenAICompatibilityModel{
+		{Name: "kept-model", Alias: "kept-model"},
+	}
+	live := []CompatCatalogModel{
+		{ID: "gone-model"},
+		{ID: "kept-model"},
+	}
+
+	merged := MergeCompatCatalogModels(configured, live, []string{"gone-model"})
+	for _, model := range merged {
+		if model.Name == "gone-model" {
+			t.Fatalf("an excluded model came back: %+v", merged)
+		}
+	}
+	if len(merged) != 1 {
+		t.Fatalf("merged len = %d, want 1: %+v", len(merged), merged)
+	}
+}
+
+func TestCompatCatalogModelExcludedMatchesWildcards(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		model    string
+		excluded []string
+		want     bool
+	}{
+		{model: "gemini-2.5-pro", excluded: []string{"gemini-2.5-pro"}, want: true},
+		{model: "gemini-2.5-pro", excluded: []string{"gemini-2.5-flash"}, want: false},
+		{model: "gemini-2.5-flash", excluded: []string{"gemini-2.5-*"}, want: true},
+		{model: "gemini-3-pro-preview", excluded: []string{"*-preview"}, want: true},
+		{model: "gemini-2.5-flash-lite", excluded: []string{"*flash*"}, want: true},
+		{model: "gemini-2.5-pro", excluded: []string{"*flash*"}, want: false},
+		{model: "GEMINI-2.5-PRO", excluded: []string{"gemini-2.5-pro"}, want: true},
+		{model: "anything", excluded: nil, want: false},
+	}
+	for _, testCase := range cases {
+		got := CompatCatalogModelExcluded(testCase.model, testCase.excluded)
+		if got != testCase.want {
+			t.Fatalf("CompatCatalogModelExcluded(%q, %v) = %v, want %v",
+				testCase.model, testCase.excluded, got, testCase.want)
+		}
+	}
+}
+
+func TestMergeCompatCatalogModelsWithNoLiveListKeepsTheConfiguredList(t *testing.T) {
+	t.Parallel()
+
+	configured := []OpenAICompatibilityModel{
+		{Name: "only-model", Alias: "only-model"},
+	}
+	merged := MergeCompatCatalogModels(configured, nil, nil)
+	if len(merged) != 1 || merged[0].Name != "only-model" {
+		t.Fatalf("merged = %+v", merged)
+	}
+}
+
+func TestMergeCompatCatalogModelsDoesNotDuplicateAConfiguredModel(t *testing.T) {
+	t.Parallel()
+
+	// The configured model is identified by its upstream name; a live entry with
+	// the same name must not create a second row.
+	configured := []OpenAICompatibilityModel{
+		{Name: "deepseek-v4.1-flash", Alias: "friendly-name"},
+	}
+	live := []CompatCatalogModel{{ID: "deepseek-v4.1-flash"}}
+
+	merged := MergeCompatCatalogModels(configured, live, nil)
+	if len(merged) != 1 {
+		t.Fatalf("merged len = %d, want 1: %+v", len(merged), merged)
+	}
+	if merged[0].Alias != "friendly-name" {
+		t.Fatalf("the configured alias was replaced: %+v", merged[0])
+	}
+}
+
+func TestCompatCatalogModelListNeverReturnsTheKeyInAModelName(t *testing.T) {
+	t.Parallel()
+
+	fetcher := func(_ context.Context, _ string, _ string, _ string) ([]byte, int, error) {
+		return []byte(`{"data":[{"id":"model-a"}]}`), http.StatusOK, nil
+	}
+	models, errList := CompatCatalogModelList(context.Background(), "https://ollama.com/v1", "super-secret", "", fetcher)
+	if errList != nil {
+		t.Fatalf("CompatCatalogModelList: %v", errList)
+	}
+	for _, model := range models {
+		if strings.Contains(model.ID, "super-secret") {
+			t.Fatal("the model list carries the API key")
+		}
+	}
+}
+
+func TestMergeCompatCatalogModelsKeepsEveryConfiguredAlias(t *testing.T) {
+	t.Parallel()
+
+	// Two rows share an upstream name under different aliases. They are two
+	// published models, and deduplicating them would drop a pinned alias.
+	configured := []OpenAICompatibilityModel{
+		{Name: "m", Alias: "a"},
+		{Name: "m", Alias: "b"},
+	}
+	live := []CompatCatalogModel{{ID: "x"}, {ID: "y"}}
+
+	merged := MergeCompatCatalogModels(configured, live, nil)
+	if len(merged) != 4 {
+		t.Fatalf("merged len = %d, want 4: %+v", len(merged), merged)
+	}
+	if merged[0].Alias != "a" || merged[1].Alias != "b" {
+		t.Fatalf("a configured alias was dropped: %+v", merged)
+	}
+	if merged[2].Name != "x" || merged[3].Name != "y" {
+		t.Fatalf("the live models were not added: %+v", merged)
+	}
+}
+
+func TestMergeCompatCatalogModelsKeepsConfiguredRowsWhenOnlyLiveModelsAreKnown(t *testing.T) {
+	t.Parallel()
+
+	// A live model that is already configured must not create a second row, and
+	// the configured row must survive.
+	configured := []OpenAICompatibilityModel{{Name: "m", Alias: "a"}}
+	live := []CompatCatalogModel{{ID: "m"}}
+
+	merged := MergeCompatCatalogModels(configured, live, nil)
+	if len(merged) != 1 {
+		t.Fatalf("merged len = %d, want 1: %+v", len(merged), merged)
+	}
+	if merged[0].Alias != "a" {
+		t.Fatalf("the configured alias changed: %+v", merged[0])
+	}
+}
+
+func TestMergeCompatCatalogModelsDropsAModelTheProviderStoppedListing(t *testing.T) {
+	t.Parallel()
+
+	// The operator wrote one model down; the provider listed two more.
+	// The operator's rows, as the configuration holds them.
+	configured := []OpenAICompatibilityModel{
+		{Name: "operator-model", Alias: "operator-model"},
+	}
+	live := []CompatCatalogModel{{ID: "discovered-a"}, {ID: "discovered-c"}}
+
+	merged := MergeCompatCatalogModels(configured, live, nil)
+	names := make([]string, 0, len(merged))
+	for _, model := range merged {
+		names = append(names, model.Name)
+	}
+	// The operator's model stays, the model the provider still lists stays, the
+	// model it stopped listing is gone, and the new one is added.
+	want := []string{"operator-model", "discovered-a", "discovered-c"}
+	if len(names) != len(want) {
+		t.Fatalf("names = %v, want %v", names, want)
+	}
+	for index := range want {
+		if names[index] != want[index] {
+			t.Fatalf("names = %v, want %v", names, want)
+		}
+	}
+}
+
+func TestMergeCompatCatalogModelsKeepsAnOperatorAlias(t *testing.T) {
+	t.Parallel()
+
+	// The operator pinned an alias for a model the provider also lists. The pin
+	// must survive the reconciliation.
+	configured := []OpenAICompatibilityModel{
+		{Name: "shared-upstream", Alias: "friendly-alias"},
+	}
+	live := []CompatCatalogModel{{ID: "shared-upstream"}, {ID: "discovered-a"}}
+
+	merged := MergeCompatCatalogModels(configured, live, nil)
+	found := false
+	for _, model := range merged {
+		if model.Alias == "friendly-alias" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the operator's alias was dropped: %+v", merged)
+	}
+}
+
+func TestMergeCompatCatalogModelsDoesNotCollideWithAnOperatorAlias(t *testing.T) {
+	t.Parallel()
+
+	// The operator publishes "model-b" as the alias of "model-a". A discovered
+	// model called "model-b" must not be added, or requests for the alias would
+	// round-robin between two different upstreams.
+	configured := []OpenAICompatibilityModel{{Name: "model-a", Alias: "model-b"}}
+	live := []CompatCatalogModel{{ID: "model-b"}}
+
+	merged := MergeCompatCatalogModels(configured, live, nil)
+	if len(merged) != 1 {
+		t.Fatalf("merged len = %d, want 1: %+v", len(merged), merged)
+	}
+	if merged[0].Alias != "model-b" || merged[0].Name != "model-a" {
+		t.Fatalf("the operator's row was changed: %+v", merged[0])
+	}
+}
+
+func TestCompatCatalogModelExcludedMatchesTheUpstreamIdentity(t *testing.T) {
+	t.Parallel()
+
+	// A client may ask for a model with a thinking suffix, and the executor
+	// strips the suffix before sending the request upstream. An exclusion written
+	// for the upstream identity must still match.
+	excluded := []string{"openai/gpt-4.1"}
+	if !CompatCatalogModelExcluded("openai/gpt-4.1(high)", excluded) {
+		t.Fatal("a model with a thinking suffix must be excluded by its upstream name")
+	}
+	if !CompatCatalogModelExcluded("openai/gpt-4.1", excluded) {
+		t.Fatal("the upstream name must be excluded")
+	}
+	if CompatCatalogModelExcluded("openai/gpt-4o", excluded) {
+		t.Fatal("a different model must not be excluded")
+	}
+	// The executor strips any parenthesized suffix before sending the request
+	// upstream, so the exclusion has to match that identity too.
+	if !CompatCatalogModelExcluded("openai/gpt-4.1(8192)", excluded) {
+		t.Fatal("a model with a numeric suffix must be excluded by its upstream name")
+	}
+	if !CompatCatalogModelExcluded("openai/gpt-4.1(auto)", excluded) {
+		t.Fatal("a model with an automatic suffix must be excluded by its upstream name")
+	}
+	// The alias is not the upstream identity, so an exclusion for the upstream
+	// name does not match an unrelated model.
+	if CompatCatalogModelExcluded("some-other-model", excluded) {
+		t.Fatal("an unrelated model must not be excluded")
+	}
+}
+
+func TestMergeCompatCatalogModelsReservesTheAliasBaseName(t *testing.T) {
+	t.Parallel()
+
+	// The routing lookup tries the base name when the requested model carries a
+	// suffix, so an alias of "model-b(high)" also answers a request for
+	// "model-b". A discovered model that took that name would make the request
+	// round robin between two different upstreams.
+	configured := []OpenAICompatibilityModel{{Name: "model-a", Alias: "model-b(high)"}}
+	live := []CompatCatalogModel{{ID: "model-b"}}
+
+	merged := MergeCompatCatalogModels(configured, live, nil)
+	if len(merged) != 1 {
+		t.Fatalf("merged len = %d, want 1: %+v", len(merged), merged)
+	}
+	if merged[0].Alias != "model-b(high)" {
+		t.Fatalf("merged = %+v, want the operator's row", merged[0])
+	}
+}
