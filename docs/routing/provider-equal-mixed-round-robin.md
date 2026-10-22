@@ -24,7 +24,7 @@ Normalize and sort provider keys to give the provider ring a stable order. Reque
 
 The scheduler keys its provider cursor by the canonical resolved provider set and model, then rotates only among providers with ready credentials at the winning priority. The legacy provider-equal selector derives its provider set from the available candidates and also includes the route namespace in its key. Availability changes can therefore change the legacy cursor scope even when the resolved route stays the same.
 
-Provider and credential cursors are held in memory. The legacy mixed selector is retained by the manager for the lifetime of the configured selector, so consecutive requests advance its rotation rather than restarting it.
+Provider and credential cursors are held in memory. The manager retains the provider-equal rotation state across selector changes and shares it between legacy mixed selection and the session-affinity round-robin fallback, so consecutive selections advance the same rotation rather than restarting it.
 
 ### Credential selection
 
@@ -36,7 +36,7 @@ Credential rotation is scoped by provider and canonical model. Traffic for one p
 
 With session affinity enabled, only its round-robin fallback is replaced by provider-equal selection. Weighted and fill-first fallbacks keep their own behavior, including positive-weight filtering for weighted routing.
 
-Existing identity extraction, binding reuse, inheritance, TTL, and invalidation logic remain in place. A cold or rebound session uses the fallback to select a provider and credential. A request without a usable explicit or inferred session identity follows the fallback without storing a session binding.
+Existing identity extraction, inheritance, and TTL policies remain in place. Healthy bindings are reused within their scope. A cold or rebound session uses the fallback to select a provider and credential. A request without a usable explicit or inferred session identity follows the fallback without storing a session binding.
 
 For explicit session identities, the binding key is:
 
