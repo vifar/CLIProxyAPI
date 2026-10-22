@@ -117,11 +117,13 @@ func TestServiceConcurrentReplacementWaitsForInFlightDrain(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Home.Enabled = true
 	service := &Service{
-		cfg:            cfg,
-		homeCancel:     oldCancel,
-		homeClient:     home.New(internalconfig.HomeConfig{Enabled: true}),
-		homeRegistry:   registry,
-		homeDrainBound: time.Second,
+		cfg:          cfg,
+		homeCancel:   oldCancel,
+		homeClient:   home.New(internalconfig.HomeConfig{Enabled: true}),
+		homeRegistry: registry,
+		// Keep the drain bound well beyond the observation window so the pending
+		// reservation controls drain completion rather than timeout expiry.
+		homeDrainBound: time.Hour,
 	}
 
 	firstReturned := make(chan struct{})
@@ -129,11 +131,15 @@ func TestServiceConcurrentReplacementWaitsForInFlightDrain(t *testing.T) {
 		service.startHomeSubscriber(ctx)
 		close(firstReturned)
 	}()
+	// Rejection signals that draining has begun. Release each probe reservation
+	// so only pending keeps the drain open.
 	deadline := time.Now().Add(time.Second)
 	for {
-		if _, errLate := registry.BeginDispatch(); errLate != nil {
+		late, errLate := registry.BeginDispatch()
+		if errLate != nil {
 			break
 		}
+		late.End()
 		if time.Now().After(deadline) {
 			t.Fatal("first replacement did not begin draining")
 		}
@@ -145,21 +151,23 @@ func TestServiceConcurrentReplacementWaitsForInFlightDrain(t *testing.T) {
 		service.startHomeSubscriber(ctx)
 		close(secondReturned)
 	}()
+	// Observe that the second replacement stays blocked while pending holds
+	// the first drain open; require completion below after releasing it.
 	select {
 	case <-secondReturned:
 		t.Fatal("concurrent replacement returned before the first drain completed")
-	case <-time.After(50 * time.Millisecond):
+	case <-time.After(time.Second):
 	}
 
 	pending.End()
 	select {
 	case <-firstReturned:
-	case <-time.After(time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("first replacement did not complete after its drain")
 	}
 	select {
 	case <-secondReturned:
-	case <-time.After(time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("second replacement did not complete after the first drain")
 	}
 }
