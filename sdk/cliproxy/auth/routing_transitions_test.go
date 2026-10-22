@@ -113,6 +113,41 @@ func TestRoutingTransitionRecorderTruncatesTheSessionIdentifier(t *testing.T) {
 // record into each other's recorder and restore each other's previous value.
 var routingTransitionRecorderMu sync.Mutex
 
+// testRememberBoundProvider records the provider of a bound credential through
+// the locked helper the production path uses.
+func testRememberBoundProvider(selector *SessionAffinitySelector, authID, providerKey string) {
+	selector.withAffinityState(func(state *sessionAffinityState) {
+		selector.rememberBoundProviderLocked(state, authID, providerKey)
+	})
+}
+
+// testBoundProvider returns the remembered provider of a bound credential.
+func testBoundProvider(selector *SessionAffinitySelector, authID string) string {
+	var providerKey string
+	selector.withAffinityState(func(state *sessionAffinityState) {
+		providerKey = state.boundProviders[authID]
+	})
+	return providerKey
+}
+
+// testRememberFailedBinding records a failed binding through the locked helper
+// the production path uses.
+func testRememberFailedBinding(selector *SessionAffinitySelector, bindingKey, providerKey string) {
+	selector.withAffinityState(func(state *sessionAffinityState) {
+		selector.rememberFailedBindingLocked(state, bindingKey, providerKey)
+	})
+}
+
+// testTakeFailedBinding consumes a failed binding's record through the locked
+// helper the production path uses.
+func testTakeFailedBinding(selector *SessionAffinitySelector, bindingKey string) string {
+	var providerKey string
+	selector.withAffinityState(func(state *sessionAffinityState) {
+		providerKey = selector.takeFailedBindingLocked(state, bindingKey)
+	})
+	return providerKey
+}
+
 // installRoutingTransitionRecorder installs a recorder for the duration of a test
 // and returns the function that restores the previous one.
 func installRoutingTransitionRecorder(t *testing.T, recorder *RoutingTransitionRecorder) {
@@ -357,11 +392,11 @@ func TestRoutingTransitionClassifiesAnLCPReplacementByProvider(t *testing.T) {
 	t.Cleanup(selector.Stop)
 
 	// The selector remembers the provider of a bound credential.
-	selector.rememberBoundProvider("bound-auth", "provider-a")
+	testRememberBoundProvider(selector, "bound-auth", "provider-a")
 
 	// The remembered provider is returned even when the credential is not among
 	// the candidates any more.
-	if got := selector.boundProviderFor("bound-auth", nil); got != "provider-a" {
+	if got := testBoundProvider(selector, "bound-auth"); got != "provider-a" {
 		t.Fatalf("bound provider = %q, want provider-a", got)
 	}
 	_ = recorder
@@ -413,16 +448,16 @@ func TestLCPFailureRecordUsesTheSessionIdentity(t *testing.T) {
 	const namespace = "lcp:v1::mixed::model-1::caller-1"
 
 	// The failure is recorded under the session.
-	affinity.rememberFailedBinding(lcpFailedBindingKey(namespace, "session-1"), "provider-a")
+	testRememberFailedBinding(affinity, lcpFailedBindingKey(namespace, "session-1"), "provider-a")
 
 	// The retry binds a different credential and reads the record under the
 	// session, so it is found.
-	if got := affinity.takeFailedBinding(lcpFailedBindingKey(namespace, "session-1")); got != "provider-a" {
+	if got := testTakeFailedBinding(affinity, lcpFailedBindingKey(namespace, "session-1")); got != "provider-a" {
 		t.Fatalf("failed provider = %q, want provider-a", got)
 	}
 
 	// The record is consumed once.
-	if got := affinity.takeFailedBinding(lcpFailedBindingKey(namespace, "session-1")); got != "" {
+	if got := testTakeFailedBinding(affinity, lcpFailedBindingKey(namespace, "session-1")); got != "" {
 		t.Fatalf("failed provider = %q, want the record to be consumed", got)
 	}
 }
@@ -439,16 +474,16 @@ func TestLCPFailureRecordIsNotConsumedByAnotherConversation(t *testing.T) {
 	t.Cleanup(affinity.Stop)
 
 	const namespace = "lcp:v1::mixed::model-1::caller-1"
-	affinity.rememberFailedBinding(lcpFailedBindingKey(namespace, "session-1"), "provider-a")
+	testRememberFailedBinding(affinity, lcpFailedBindingKey(namespace, "session-1"), "provider-a")
 
 	// A different conversation that happens to use the same credential does not
 	// find the record.
-	if got := affinity.takeFailedBinding(lcpFailedBindingKey(namespace, "session-2")); got != "" {
+	if got := testTakeFailedBinding(affinity, lcpFailedBindingKey(namespace, "session-2")); got != "" {
 		t.Fatalf("failed provider = %q, want no record for another conversation", got)
 	}
 
 	// The record is still there for the conversation that failed.
-	if got := affinity.takeFailedBinding(lcpFailedBindingKey(namespace, "session-1")); got != "provider-a" {
+	if got := testTakeFailedBinding(affinity, lcpFailedBindingKey(namespace, "session-1")); got != "provider-a" {
 		t.Fatalf("failed provider = %q, want provider-a", got)
 	}
 }
@@ -471,13 +506,13 @@ func TestSessionAffinityRemembersTheProviderOfEveryBinding(t *testing.T) {
 
 	// The provider is remembered on the binding path, so the next replacement
 	// can be classified.
-	affinity.rememberBoundProvider("auth-b", "provider-b")
-	if got := affinity.boundProviderFor("auth-b", nil); got != "provider-b" {
+	testRememberBoundProvider(affinity, "auth-b", "provider-b")
+	if got := testBoundProvider(affinity, "auth-b"); got != "provider-b" {
 		t.Fatalf("bound provider = %q, want provider-b", got)
 	}
 
 	// A replacement in another provider is a provider failover.
-	if affinity.boundProviderFor("auth-b", nil) == "provider-a" {
+	if testBoundProvider(affinity, "auth-b") == "provider-a" {
 		t.Fatal("the remembered provider must be the bound one")
 	}
 }

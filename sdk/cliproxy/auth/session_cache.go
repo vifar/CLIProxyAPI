@@ -130,57 +130,6 @@ func (c *SessionCache) GetAndRefresh(sessionID string) (string, bool) {
 	return entry.authID, true
 }
 
-// AliasGroup returns the identifiers that name the same binding as the given
-// one.
-//
-// A conversation can be addressed by more than one identifier. The failure of a
-// binding has to be recorded under all of them, or a retry that carries a
-// different identifier would not find it.
-//
-// The group is collected from the bindings that share the entry's aliases, so
-// two identifiers that were bound to the same credential are in one group even
-// when they are separate entries.
-func (c *SessionCache) AliasGroup(sessionID string) []string {
-	if c == nil || sessionID == "" {
-		return nil
-	}
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	c.ensureInitializedLocked()
-	entry, ok := c.entries[sessionID]
-	if !ok {
-		return nil
-	}
-	group := make([]string, 0, len(entry.aliases)+1)
-	group = append(group, sessionID)
-	for _, alias := range entry.aliases {
-		if alias == sessionID {
-			continue
-		}
-		group = append(group, alias)
-		// An identifier that was bound to the same credential names the same
-		// binding, even when it is a separate entry.
-		if other, okOther := c.entries[alias]; okOther && other.authID == entry.authID {
-			for _, nested := range other.aliases {
-				if nested != alias && !containsSessionAlias(group, nested) {
-					group = append(group, nested)
-				}
-			}
-		}
-	}
-	return group
-}
-
-// containsSessionAlias reports whether the list already holds the identifier.
-func containsSessionAlias(list []string, value string) bool {
-	for _, item := range list {
-		if item == value {
-			return true
-		}
-	}
-	return false
-}
-
 // Set binds a session to an auth ID with TTL refresh. Existing aliases for the
 // same logical session remain attached when the binding is refreshed or moved.
 func (c *SessionCache) Set(sessionID, authID string) {
@@ -378,35 +327,21 @@ func (c *SessionCache) Touch(sessionID, expectedAuthID string) bool {
 	return true
 }
 
-// CompareAndDelete removes the session binding only if it is currently bound to expectedAuthID.
+// CompareAndDelete removes the session binding only if it is currently bound to
+// expectedAuthID.
+//
+// The binding's other identifiers keep the binding, so removing one name of it
+// does not take the whole binding away.
 func (c *SessionCache) CompareAndDelete(sessionID, expectedAuthID string) bool {
-	removed, ok := c.CompareAndDeleteReporting(sessionID, expectedAuthID, nil)
-	return ok && removed != ""
-}
-
-// CompareAndDeleteReporting removes a binding only if it still points at the
-// expected credential, and calls report with the credential it removed.
-//
-// The report is called while the cache lock is held, so the removal and the
-// attribution it publishes are one step. A concurrent selection cannot observe
-// the removal and bind a different credential in between, which would leave the
-// attribution describing a binding that no longer exists.
-//
-// The callback must not call back into the cache.
-func (c *SessionCache) CompareAndDeleteReporting(sessionID, expectedAuthID string, report func(removedAuthID string)) (string, bool) {
 	if c == nil || sessionID == "" || expectedAuthID == "" {
-		return "", false
+		return false
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.ensureInitializedLocked()
 	entry, ok := c.entries[sessionID]
 	if !ok || entry.authID != expectedAuthID {
-		return "", false
-	}
-	removed := entry.authID
-	if report != nil {
-		report(removed)
+		return false
 	}
 	c.removeAliasGroupLocked(entry)
 
@@ -419,7 +354,7 @@ func (c *SessionCache) CompareAndDeleteReporting(sessionID, expectedAuthID strin
 	if len(surviving) > 0 {
 		c.replaceAliasGroupsLocked(entry.authID, entry.expiresAt, surviving)
 	}
-	return removed, true
+	return true
 }
 
 // CompareAndDeleteGroupReporting removes the whole binding a session

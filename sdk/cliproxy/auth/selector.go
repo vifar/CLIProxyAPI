@@ -1371,6 +1371,16 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		if s.shouldPreserveBindingWhenUnavailable(ctx, availabilityCandidates, model, cachedAuthID, now) {
 			bind(cachedAuthID)
 			entry.Infof("session-affinity: cache hit but auth transiently unavailable, failover without rebinding | session=%s bound_auth=%s failover_auth=%s provider=%s model=%s", truncateSessionID(primaryID), cachedAuthID, auth.ID, provider, model)
+			// The session keeps its binding: another credential serves the
+			// request for now, and the binding is neither replaced nor created.
+			// The transition is a hit, so the operator sees that the session
+			// stayed with the provider it was bound to.
+			recordRoutingTransition(ctx, RoutingTransitionEvent{
+				Transition: RoutingTransitionBindingHit,
+				Model:      model,
+				Provider:   s.routingProviderKeyForAuthID(cachedAuthID, availabilityCandidates),
+				Session:    primaryID,
+			})
 			return auth, nil
 		}
 		// The bound credential was unavailable. The replacement is attributed to
@@ -1474,6 +1484,12 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 				if newProvider != "" && newProvider != previousProvider {
 					transition = RoutingTransitionProviderFailover
 				}
+			} else if fallbackIsParent {
+				// A child or a fork inherits its parent's credential, but the
+				// binding it writes is its own: a parent's session is not an
+				// alias of it. The child's first binding is therefore a
+				// creation, not a hit on a binding that was already there.
+				transition = RoutingTransitionBindingCreated
 			}
 			recordRoutingTransition(ctx, RoutingTransitionEvent{
 				Transition:       transition,
@@ -1496,6 +1512,15 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 					}
 					bind(cachedAuthID)
 					entry.Infof("session-affinity: fallback cache hit but auth transiently unavailable, failover without rebinding | session=%s fallback=%s bound_auth=%s failover_auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), cachedAuthID, auth.ID, provider, model)
+					// The session keeps its binding: another credential serves the
+					// request for now, and the binding is neither replaced nor
+					// created.
+					recordRoutingTransition(ctx, RoutingTransitionEvent{
+						Transition: RoutingTransitionBindingHit,
+						Model:      model,
+						Provider:   s.routingProviderKeyForAuthID(cachedAuthID, availabilityCandidates),
+						Session:    primaryID,
+					})
 					return auth, nil
 				}
 			}
@@ -1645,23 +1670,6 @@ func (s *SessionAffinitySelector) routingProviderKeyForAuthID(authID string, can
 	return ""
 }
 
-// rememberBoundProvider records which provider a bound credential belongs to.
-//
-// The map is bounded: a client cannot make it grow without limit by cycling
-// through credentials.
-func (s *SessionAffinitySelector) rememberBoundProvider(authID, providerKey string) {
-	if s == nil || authID == "" || providerKey == "" {
-		return
-	}
-	state := s.affinityState
-	if state == nil {
-		return
-	}
-	state.mu.Lock()
-	defer state.mu.Unlock()
-	s.rememberBoundProviderLocked(state, authID, providerKey)
-}
-
 // rememberBoundProviderLocked records which provider a bound credential belongs
 // to. The caller holds the state lock.
 func (s *SessionAffinitySelector) rememberBoundProviderLocked(state *sessionAffinityState, authID, providerKey string) {
@@ -1676,48 +1684,6 @@ func (s *SessionAffinitySelector) rememberBoundProviderLocked(state *sessionAffi
 		}
 	}
 	state.boundProviders[authID] = providerKey
-}
-
-// boundProviderFor returns the remembered provider of a bound credential, falling
-// back to the candidate lookup.
-func (s *SessionAffinitySelector) boundProviderFor(authID string, candidates []*Auth) string {
-	if s == nil || authID == "" {
-		return ""
-	}
-	state := s.affinityState
-	if state == nil {
-		return ""
-	}
-	state.mu.Lock()
-	remembered := state.boundProviders[authID]
-	state.mu.Unlock()
-	if remembered != "" {
-		return remembered
-	}
-	return s.routingProviderKeyForAuthID(authID, candidates)
-}
-
-// rememberFailedBinding records that a binding's credential failed, so the next
-// selection for that binding can be reported as the replacement it is.
-//
-// The record is keyed by the binding's own key, which carries the provider
-// namespace, the session and the model, so a failure for one model cannot be
-// consumed by a request for another. It is removed once it is reported, so one
-// failure is reported once.
-//
-// The map is bounded and the records expire, so a client that makes many sessions
-// fail cannot grow it without limit.
-func (s *SessionAffinitySelector) rememberFailedBinding(bindingKey, providerKey string) {
-	if s == nil || bindingKey == "" || providerKey == "" {
-		return
-	}
-	state := s.affinityState
-	if state == nil {
-		return
-	}
-	state.mu.Lock()
-	defer state.mu.Unlock()
-	s.rememberFailedBindingLocked(state, bindingKey, providerKey)
 }
 
 // rememberFailedBindingLocked records a failed binding. The caller holds the
@@ -1862,30 +1828,6 @@ func (s *SessionAffinitySelector) withAffinityState(operation func(state *sessio
 	operation(state)
 }
 
-// takeFailedBinding returns and clears the provider recorded for a failed binding.
-func (s *SessionAffinitySelector) takeFailedBinding(bindingKey string) string {
-	if s == nil || bindingKey == "" {
-		return ""
-	}
-	state := s.affinityState
-	if state == nil {
-		return ""
-	}
-	state.mu.Lock()
-	defer state.mu.Unlock()
-	record, ok := state.failedBindings[bindingKey]
-	if !ok {
-		return ""
-	}
-	delete(state.failedBindings, bindingKey)
-	// The record is only usable while it is fresh. Expiration is checked here as
-	// well as on insertion, so a quiet session cannot consume a stale record.
-	if time.Since(record.at) > failedBindingTTL {
-		return ""
-	}
-	return record.provider
-}
-
 // expireFailedBindingsLocked removes the records that have expired.
 func (s *SessionAffinitySelector) expireFailedBindingsLocked(state *sessionAffinityState, now time.Time) {
 	for key, record := range state.failedBindings {
@@ -2021,6 +1963,12 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 					transition = RoutingTransitionProviderFailover
 				}
 				previousProvider = lcpHitFailedProvider
+			} else if match.IsFork {
+				// A fork creates a separate binding and leaves its parent
+				// intact. The matched parent supplies the credential for a new
+				// child identity, so the binding the fork writes is new and the
+				// transition is a creation, not a hit on the parent's binding.
+				transition = RoutingTransitionBindingCreated
 			}
 			recordRoutingTransition(ctx, RoutingTransitionEvent{
 				Transition:       transition,
@@ -2148,14 +2096,19 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 		newProvider := s.routingProviderKey(auth)
 		transition := RoutingTransitionBindingCreated
 		previousProvider := ""
+		// The provider the event names is the one the binding belongs to. A
+		// preserved binding stays with its own credential, so the event names
+		// that credential's provider and not the one that served the request.
+		eventProvider := newProvider
 		emit := true
 		switch {
 		case preservedAuthID != "":
 			// A preserved binding is not replaced: the session stays bound to its
 			// credential and another one serves the request. Nothing is created
-			// and nothing is replaced, so no transition is reported. The explicit
-			// session paths behave the same way.
-			emit = false
+			// and nothing is replaced, but the session kept its binding, so the
+			// transition is a hit. The explicit session paths behave the same way.
+			transition = RoutingTransitionBindingHit
+			eventProvider = s.routingProviderKeyForAuthID(preservedAuthID, available)
 		default:
 			// The sequence may have been removed by a credential-attributed
 			// failure, in which case the retry is the replacement of that binding.
@@ -2196,7 +2149,7 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 			recordRoutingTransition(ctx, RoutingTransitionEvent{
 				Transition:       transition,
 				Model:            model,
-				Provider:         newProvider,
+				Provider:         eventProvider,
 				PreviousProvider: previousProvider,
 				Session:          bindRes.SessionID,
 			})
