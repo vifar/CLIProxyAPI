@@ -235,13 +235,6 @@ func (f modelRegistrationFence) publishIfCurrent(s *Service, authID string, publ
 					}
 				}
 			}
-			// The compatible provider's own excluded-models list applies to it
-			// as well, and it is not part of the global OAuth exclusions. A
-			// registration that captured one configuration must not publish
-			// under a later one, or an excluded model would be republished.
-			if f.compatAuth != nil && f.compatExclusions != compatExcludedModelsSummaryForConfig(s.cfg, f.compatAuth) {
-				return false
-			}
 			// Hold cfgMu through registry publication, not just the comparison.
 		}
 		return publish()
