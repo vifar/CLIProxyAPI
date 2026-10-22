@@ -1375,10 +1375,18 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 			// request for now, and the binding is neither replaced nor created.
 			// The transition is a hit, so the operator sees that the session
 			// stayed with the provider it was bound to.
+			//
+			// The provider is the bound credential's, and it is read from the
+			// remembered state: the bound credential is not among the eligible
+			// credentials any more, so the candidates cannot name its provider.
+			var boundProvider string
+			s.withAffinityState(func(state *sessionAffinityState) {
+				boundProvider = s.boundProviderForCredential(state, cachedAuthID, availabilityCandidates)
+			})
 			recordRoutingTransition(ctx, RoutingTransitionEvent{
 				Transition: RoutingTransitionBindingHit,
 				Model:      model,
-				Provider:   s.routingProviderKeyForAuthID(cachedAuthID, availabilityCandidates),
+				Provider:   boundProvider,
 				Session:    primaryID,
 			})
 			return auth, nil
@@ -1515,10 +1523,19 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 					// The session keeps its binding: another credential serves the
 					// request for now, and the binding is neither replaced nor
 					// created.
+					//
+					// The provider is the bound credential's, and it is read from
+					// the remembered state: the bound credential is not among the
+					// eligible credentials any more, so the candidates cannot
+					// name its provider.
+					var boundProvider string
+					s.withAffinityState(func(state *sessionAffinityState) {
+						boundProvider = s.boundProviderForCredential(state, cachedAuthID, availabilityCandidates)
+					})
 					recordRoutingTransition(ctx, RoutingTransitionEvent{
 						Transition: RoutingTransitionBindingHit,
 						Model:      model,
-						Provider:   s.routingProviderKeyForAuthID(cachedAuthID, availabilityCandidates),
+						Provider:   boundProvider,
 						Session:    primaryID,
 					})
 					return auth, nil
@@ -1734,6 +1751,27 @@ func (s *SessionAffinitySelector) currentBoundAuthID(cacheKey, fallbackKey strin
 		}
 	}
 	return ""
+}
+
+// boundProviderForCredential returns the provider a bound credential belongs
+// to.
+//
+// The remembered provider is used, because the credential may have left the
+// eligible set: a binding that is preserved while its credential is
+// unavailable is described by the provider it was bound to, and the eligible
+// credentials do not contain it any more.
+//
+// The caller holds the affinity state's lock.
+func (s *SessionAffinitySelector) boundProviderForCredential(state *sessionAffinityState, authID string, candidates []*Auth) string {
+	if authID == "" {
+		return ""
+	}
+	if state != nil {
+		if providerKey := state.boundProviders[authID]; providerKey != "" {
+			return providerKey
+		}
+	}
+	return s.routingProviderKeyForAuthID(authID, candidates)
 }
 
 // attributionKeyForBinding returns the key a binding's failure attribution is
@@ -2018,6 +2056,7 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 	var lcpFailedProvider string
 	var replacedProvider string
 	var replacedAuthID string
+	var preservedBoundProvider string
 	var bindRes cliproxysession.MerklePrefixBindResult
 	// The provider the binding belongs to is published in the same step as the
 	// binding, so a replacement that follows it sees the provider.
@@ -2039,6 +2078,12 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 		}
 		lcpFailedProvider = s.takeFailedBindingLocked(state, lcpFailedBindingKey(namespace, cliproxysession.SequenceIdentity(fingerprints)))
 		bindRes = s.matcher.BindFingerprintsWithContext(namespace, fingerprints, tailFingerprints, envDigest, minPrefixLength, bindAuthID)
+		// A preserved binding keeps its own credential, so its provider is read
+		// from the remembered state: the bound credential is not among the
+		// eligible credentials any more, so the candidates cannot name it.
+		if preservedAuthID != "" {
+			preservedBoundProvider = s.boundProviderForCredential(state, preservedAuthID, available)
+		}
 		// The bound provider is remembered for every binding that is not
 		// preserved, so the next replacement of this binding can be told apart
 		// from a replacement in another provider even after the bound credential
@@ -2108,7 +2153,7 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 			// and nothing is replaced, but the session kept its binding, so the
 			// transition is a hit. The explicit session paths behave the same way.
 			transition = RoutingTransitionBindingHit
-			eventProvider = s.routingProviderKeyForAuthID(preservedAuthID, available)
+			eventProvider = preservedBoundProvider
 		default:
 			// The sequence may have been removed by a credential-attributed
 			// failure, in which case the retry is the replacement of that binding.

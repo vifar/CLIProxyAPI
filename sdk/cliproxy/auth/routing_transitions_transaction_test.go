@@ -127,7 +127,10 @@ func (f *barrierFallback) Pick(ctx context.Context, _, _ string, _ cliproxyexecu
 func TestRoutingTransitionStalePredecessorIsNotReported(t *testing.T) {
 	t.Parallel()
 
-	recorder := NewRoutingTransitionRecorder(10)
+	// The recorder is process-wide and a ring buffer, so a parallel test can
+	// record into it. A large buffer keeps this test's own events from being
+	// evicted before they are read.
+	recorder := NewRoutingTransitionRecorder(4096)
 	selector, _, providerA, model := routingTransitionTestSelector(t, recorder)
 
 	// The conversation is bound to the first credential.
@@ -181,7 +184,10 @@ func TestRoutingTransitionStalePredecessorIsNotReported(t *testing.T) {
 func TestRoutingTransitionConcurrentColdRequestsReportOneCreation(t *testing.T) {
 	t.Parallel()
 
-	recorder := NewRoutingTransitionRecorder(10)
+	// The recorder is process-wide and a ring buffer, so a parallel test can
+	// record into it. A large buffer keeps this test's own events from being
+	// evicted before they are read.
+	recorder := NewRoutingTransitionRecorder(4096)
 	manager := NewManager(nil, nil, nil)
 	fallback := newBarrierFallback(2, &Auth{ID: "rt-auth-a", Provider: "rt-provider-a"})
 	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
@@ -243,7 +249,10 @@ func TestRoutingTransitionConcurrentColdRequestsReportOneCreation(t *testing.T) 
 func TestRoutingTransitionFailureRemovesTheWholeBinding(t *testing.T) {
 	t.Parallel()
 
-	recorder := NewRoutingTransitionRecorder(10)
+	// The recorder is process-wide and a ring buffer, so a parallel test can
+	// record into it. A large buffer keeps this test's own events from being
+	// evicted before they are read.
+	recorder := NewRoutingTransitionRecorder(4096)
 	selector, _, providerA, model := routingTransitionTestSelector(t, recorder)
 
 	firstOpts := routingTransitionOptions("mixed", model, "rt-whole-pck-a", "rt-whole-conv")
@@ -315,7 +324,10 @@ func TestRoutingTransitionFailureRemovesTheWholeBinding(t *testing.T) {
 func TestRoutingTransitionLateFailureRemovesTheReboundBinding(t *testing.T) {
 	t.Parallel()
 
-	recorder := NewRoutingTransitionRecorder(10)
+	// The recorder is process-wide and a ring buffer, so a parallel test can
+	// record into it. A large buffer keeps this test's own events from being
+	// evicted before they are read.
+	recorder := NewRoutingTransitionRecorder(4096)
 	selector, _, providerA, model := routingTransitionTestSelector(t, recorder)
 
 	// The conversation is bound under the first prompt cache key.
@@ -353,6 +365,63 @@ func TestRoutingTransitionLateFailureRemovesTheReboundBinding(t *testing.T) {
 	}
 }
 
+// TestRoutingTransitionPreservedBindingKeepsItsProvider asserts that a
+// preserved binding's event names the provider the binding belongs to.
+//
+// The bound credential is unavailable and another one serves the request, but
+// the binding is kept. The bound credential is not among the eligible
+// credentials any more, so the provider has to come from the remembered state;
+// an event without a provider would count under the empty provider.
+func TestRoutingTransitionPreservedBindingKeepsItsProvider(t *testing.T) {
+	t.Parallel()
+
+	// The recorder is process-wide and a ring buffer, so a parallel test can
+	// record into it. A large buffer keeps this test's own events from being
+	// evicted before they are read.
+	recorder := NewRoutingTransitionRecorder(4096)
+	manager := NewManager(nil, nil, nil)
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Hour,
+		RebindOn: SessionAffinityRebindOnQuota,
+	})
+	t.Cleanup(selector.Stop)
+	manager.SetSelector(selector)
+	installRoutingTransitionRecorder(t, recorder)
+
+	model := "rt-txn-model"
+	providerA := "rt-provider-a"
+	providerB := "rt-provider-b"
+	opts := routingTransitionOptions("mixed", model, "rt-preserved-pck", "rt-preserved-conv")
+	bound := []*Auth{{ID: "rt-auth-a", Provider: providerA}}
+
+	// The session is bound to the first credential.
+	if _, errPick := selector.Pick(context.Background(), "mixed", model, opts, bound); errPick != nil {
+		t.Fatalf("first Pick: %v", errPick)
+	}
+
+	// The bound credential is transiently unavailable and another credential
+	// serves the request. The binding is kept.
+	ctx := context.WithValue(context.Background(), prevalidatedAuthCandidatesKey{}, true)
+	ctx = withSessionAffinityTransientAuthIDs(ctx, map[string]struct{}{"rt-auth-a": {}})
+	other := []*Auth{{ID: "rt-auth-b", Provider: providerB}}
+	if _, errPick := selector.Pick(ctx, "mixed", model, opts, other); errPick != nil {
+		t.Fatalf("second Pick: %v", errPick)
+	}
+
+	events := routingTransitionEvents(recorder, model)
+	if len(events) != 2 {
+		t.Fatalf("events = %d, want 2: %+v", len(events), events)
+	}
+	last := events[len(events)-1]
+	if last.Transition != RoutingTransitionBindingHit {
+		t.Fatalf("last transition = %q, want %q: %+v", last.Transition, RoutingTransitionBindingHit, last)
+	}
+	if last.Provider != providerA {
+		t.Fatalf("provider = %q, want the bound provider %q: %+v", last.Provider, providerA, last)
+	}
+}
+
 // TestRoutingTransitionChildFirstBindingIsACreation asserts that a child's
 // first binding is reported as a creation.
 //
@@ -362,7 +431,10 @@ func TestRoutingTransitionLateFailureRemovesTheReboundBinding(t *testing.T) {
 func TestRoutingTransitionChildFirstBindingIsACreation(t *testing.T) {
 	t.Parallel()
 
-	recorder := NewRoutingTransitionRecorder(10)
+	// The recorder is process-wide and a ring buffer, so a parallel test can
+	// record into it. A large buffer keeps this test's own events from being
+	// evicted before they are read.
+	recorder := NewRoutingTransitionRecorder(4096)
 	selector, _, providerA, model := routingTransitionTestSelector(t, recorder)
 
 	// The parent's session is bound to the first credential.
@@ -424,7 +496,10 @@ func TestRoutingTransitionChildFirstBindingIsACreation(t *testing.T) {
 func TestRoutingTransitionChildRetryFindsItsOwnAttribution(t *testing.T) {
 	t.Parallel()
 
-	recorder := NewRoutingTransitionRecorder(10)
+	// The recorder is process-wide and a ring buffer, so a parallel test can
+	// record into it. A large buffer keeps this test's own events from being
+	// evicted before they are read.
+	recorder := NewRoutingTransitionRecorder(4096)
 	selector, _, providerA, model := routingTransitionTestSelector(t, recorder)
 
 	// The child's session identifier carries the agent marker, so it is a
