@@ -3,6 +3,8 @@ package auth
 import (
 	"testing"
 	"time"
+
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
 // TestProviderSetScopeIsUnambiguous asserts that two different provider sets
@@ -119,6 +121,34 @@ func TestScopedLookupIgnoresABracketInAPlainProviderName(t *testing.T) {
 	found = cache.GetByScopeSuffixes("openai[compat]", []string{"::header:s1::model-1"})
 	if len(found) != 1 {
 		t.Fatalf("found = %v, want the binding of the provider itself", found)
+	}
+}
+
+// TestLCPAffinityNamespaceIsStableForAScopedProvider asserts that the LCP
+// namespace of a scoped provider is the same however it is reached.
+//
+// The selection builds the namespace from the route's provider, and the result
+// handling reads the provider back out of the namespace and builds it again. If
+// the two disagree, a success update writes a second binding and a failure
+// leaves the selected binding in place.
+func TestLCPAffinityNamespaceIsStableForAScopedProvider(t *testing.T) {
+	t.Parallel()
+
+	metadata := map[string]any{
+		cliproxyexecutor.CallerScopeMetadataKey:                "caller-1",
+		cliproxyexecutor.SessionAffinityProviderSetMetadataKey: "codex,openai-compatible-a%2Cb",
+	}
+	selected := lcpAffinityNamespace("mixed", "model-1", metadata)
+	if selected == "" {
+		t.Fatal("no namespace was built")
+	}
+
+	// The result handling builds the namespace from the provider the selection
+	// already scoped, so the two must agree.
+	scopedProvider := sessionAffinityNamespace("mixed", metadata)
+	again := lcpAffinityNamespace(scopedProvider, "model-1", metadata)
+	if again != selected {
+		t.Fatalf("the namespace changed: %q -> %q", selected, again)
 	}
 }
 

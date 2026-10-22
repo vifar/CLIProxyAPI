@@ -1724,17 +1724,19 @@ func canonicalProviderSetScope(providerSet map[string]struct{}) string {
 // delimited by brackets and separated by colons, so those characters and the
 // percent sign itself are encoded. The encoding is unambiguous, so a scope
 // always names exactly one provider set.
+//
+// The escape is lower case, because a namespace is lower cased on some paths
+// and a scope that changed under it would address another binding.
 func encodeProviderScopeComponent(name string) string {
 	var out strings.Builder
 	out.Grow(len(name))
 	for i := 0; i < len(name); i++ {
 		c := name[i]
 		switch {
-		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9',
-			c == '-', c == '_', c == '.':
+		case c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '-', c == '_', c == '.':
 			out.WriteByte(c)
 		default:
-			out.WriteString(fmt.Sprintf("%%%02X", c))
+			out.WriteString(fmt.Sprintf("%%%02x", c))
 		}
 	}
 	return out.String()

@@ -1471,19 +1471,37 @@ func canonicalLCPProvider(provider string) string {
 }
 
 func lcpAffinityNamespace(provider, model string, metadata map[string]any) string {
-	provider = canonicalLCPProvider(provider)
 	model = canonicalModelKey(model)
 	callerScope := sessionMetadataString(metadata, cliproxyexecutor.CallerScopeMetadataKey)
 	if provider == "" || callerScope == "" {
 		return ""
 	}
+	// The provider is canonicalized on its own, and a provider that already
+	// carries the provider-set scope keeps the scope it has. The scope carries
+	// percent escapes, and lower casing it would change the namespace and
+	// address another binding.
+	scoped := lcpScopedProvider(provider)
 	// The LCP namespace must carry the same provider-set scope as the explicit
 	// binding namespace, so selection, success, eviction and lookup all address
 	// one namespace. Without it, a mixed request with a caller scope and no
 	// explicit session would keep its original binding after a credential failure
 	// and would read an unscoped binding after the provider set changed.
-	scoped := sessionAffinityNamespace(provider, metadata)
+	if scoped == provider {
+		scoped = sessionAffinityNamespace(scoped, metadata)
+	}
 	return strings.Join([]string{"lcp:v1", scoped, model, callerScope}, "::")
+}
+
+// lcpScopedProvider canonicalizes a provider that carries a provider-set scope.
+//
+// The scope is kept exactly as it is. Only the provider in front of it is
+// canonicalized, so a scope that carries percent escapes is never rewritten.
+func lcpScopedProvider(provider string) string {
+	if !strings.HasPrefix(provider, mixedAffinityNamespace+"[") {
+		return canonicalLCPProvider(provider)
+	}
+	base := lcpNamespaceProvider(provider)
+	return base + provider[len(base):]
 }
 
 func parseLCPNamespace(ns string) (provider, model, callerScope string, ok bool) {
