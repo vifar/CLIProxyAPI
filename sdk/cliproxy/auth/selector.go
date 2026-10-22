@@ -416,7 +416,7 @@ func canonicalModelKey(model string) string {
 // single-provider route keeps its plain provider namespace.
 func sessionAffinityNamespace(provider string, metadata map[string]any) string {
 	provider = strings.TrimSpace(provider)
-	if provider != "mixed" {
+	if provider != mixedAffinityNamespace {
 		return provider
 	}
 	if metadata == nil {
@@ -1510,7 +1510,14 @@ func parseLCPNamespace(ns string) (provider, model, callerScope string, ok bool)
 
 // lcpNamespaceProvider strips a provider-set scope from a namespace provider
 // segment, so "mixed[a,b]" reads as "mixed".
+//
+// The scope syntax belongs to the mixed namespace. A plain provider name that
+// contains a bracket is not a scoped namespace, and truncating it would read
+// one provider as another.
 func lcpNamespaceProvider(segment string) string {
+	if !strings.HasPrefix(segment, mixedAffinityNamespace+"[") {
+		return segment
+	}
 	if index := strings.Index(segment, "["); index > 0 {
 		return segment[:index]
 	}

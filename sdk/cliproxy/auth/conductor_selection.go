@@ -1685,6 +1685,16 @@ func canonicalSchedulingProvider(key string) string {
 // canonicalProviderSetScope renders an eligible provider set as a stable scope
 // string for the session affinity namespace. The set is sorted so that two sets
 // that differ only in order share one scope.
+// canonicalProviderSetScope returns the scope that names an eligible provider
+// set.
+//
+// The components are encoded before they are joined, so two different sets
+// never produce the same scope: one provider named "a,b" and two providers
+// named "a" and "b" are different sets, and they must not share a scope. A
+// binding created under one set is then never reused under another one.
+//
+// The scope is carried in a cache key that is delimited by brackets, so the
+// characters that are structural there are encoded as well.
 func canonicalProviderSetScope(providerSet map[string]struct{}) string {
 	if len(providerSet) == 0 {
 		return ""
@@ -1700,7 +1710,34 @@ func canonicalProviderSetScope(providerSet map[string]struct{}) string {
 		return ""
 	}
 	sort.Strings(keys)
-	return strings.Join(keys, ",")
+	encoded := make([]string, 0, len(keys))
+	for _, key := range keys {
+		encoded = append(encoded, encodeProviderScopeComponent(key))
+	}
+	return strings.Join(encoded, ",")
+}
+
+// encodeProviderScopeComponent encodes one provider name for a provider-set
+// scope.
+//
+// The scope is joined with a comma and carried in a cache key that is
+// delimited by brackets and separated by colons, so those characters and the
+// percent sign itself are encoded. The encoding is unambiguous, so a scope
+// always names exactly one provider set.
+func encodeProviderScopeComponent(name string) string {
+	var out strings.Builder
+	out.Grow(len(name))
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9',
+			c == '-', c == '_', c == '.':
+			out.WriteByte(c)
+		default:
+			out.WriteString(fmt.Sprintf("%%%02X", c))
+		}
+	}
+	return out.String()
 }
 
 func (m *Manager) executorLocked(provider string) (ProviderExecutor, bool) {

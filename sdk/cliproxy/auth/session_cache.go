@@ -11,6 +11,10 @@ import (
 const (
 	maxStableSessionAliases  = 64
 	defaultMaxSessionEntries = 65536
+
+	// mixedAffinityNamespace is the namespace of a mixed-provider route. It is
+	// the only namespace that carries a provider-set scope.
+	mixedAffinityNamespace = "mixed"
 )
 
 // sessionEntry stores an auth binding, its identifier aliases, and expiration.
@@ -212,6 +216,13 @@ func (c *SessionCache) GetByScopeSuffixes(namespace string, suffixes []string) m
 			// that contains the separator would otherwise make one session's key
 			// match another session's lookup.
 			if head != namespace {
+				// The scope syntax belongs to the mixed namespace. A plain
+				// provider name that contains a bracket is not a scoped
+				// namespace, and reading it as one would make a binding of one
+				// provider answer a lookup of another.
+				if namespace != mixedAffinityNamespace {
+					continue
+				}
 				if !strings.HasPrefix(head, namespace+"[") {
 					continue
 				}
