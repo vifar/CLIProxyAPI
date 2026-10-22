@@ -265,7 +265,8 @@ func truncateWebsocketCloseReason(reason string, maxBytes int) string {
 // ResponsesWebsocket handles websocket requests for /v1/responses.
 // It accepts `response.create` and `response.append` requests and streams
 // response events back as JSON websocket text messages. `response.interrupt`
-// is forwarded to the current Codex upstream socket without starting a new turn.
+// is forwarded to the current Codex upstream socket without starting a new turn,
+// or handled locally for an HTTP turn according to responsesLocalInterrupt.deliver.
 func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	conn, err := responsesWebsocketUpgrader.Upgrade(c.Writer, c.Request, websocketUpgradeHeaders(c.Request))
 	if err != nil {
