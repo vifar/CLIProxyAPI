@@ -1715,6 +1715,14 @@ func (s *SessionAffinitySelector) rememberBoundProviderLocked(state *sessionAffi
 	if state == nil || authID == "" || providerKey == "" {
 		return
 	}
+	// A credential that is already remembered is refreshed in place. The room
+	// is only made when a new credential is remembered: evicting on a refresh
+	// would drop the attribution of an unrelated credential, and a failure of
+	// that credential could then no longer be attributed to its provider.
+	if _, exists := state.boundProviders[authID]; exists {
+		state.boundProviders[authID] = providerKey
+		return
+	}
 	if len(state.boundProviders) >= maxBoundProviderEntries {
 		// Drop an arbitrary entry rather than grow without bound.
 		for key := range state.boundProviders {
@@ -1732,6 +1740,17 @@ func (s *SessionAffinitySelector) rememberFailedBindingLocked(state *sessionAffi
 		return
 	}
 	s.expireFailedBindingsLocked(state, time.Now())
+	// A record that is already there is refreshed in place. The room is only
+	// made when a new record is published: evicting on a refresh would drop
+	// the attribution of an unrelated binding, and a failure of that binding
+	// could then no longer be reported as its replacement.
+	if _, exists := state.failedBindings[bindingKey]; exists {
+		state.failedBindings[bindingKey] = failedBindingRecord{
+			provider: providerKey,
+			at:       time.Now(),
+		}
+		return
+	}
 	if len(state.failedBindings) >= maxFailedBindingEntries {
 		// Drop the oldest record rather than grow without bound.
 		oldestKey := ""
