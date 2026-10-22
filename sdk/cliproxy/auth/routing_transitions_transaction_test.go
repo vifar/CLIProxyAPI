@@ -353,6 +353,67 @@ func TestRoutingTransitionLateFailureRemovesTheReboundBinding(t *testing.T) {
 	}
 }
 
+// TestRoutingTransitionChildFirstBindingIsACreation asserts that a child's
+// first binding is reported as a creation.
+//
+// A child inherits its parent's credential, but the binding it writes is its
+// own: a parent's session is not an alias of it. Reporting the child's first
+// binding as a hit would claim a binding that was never there.
+func TestRoutingTransitionChildFirstBindingIsACreation(t *testing.T) {
+	t.Parallel()
+
+	recorder := NewRoutingTransitionRecorder(10)
+	selector, _, providerA, model := routingTransitionTestSelector(t, recorder)
+
+	// The parent's session is bound to the first credential.
+	parentOpts := cliproxyexecutor.Options{
+		Headers: http.Header{
+			"Content-Type":          []string{"application/json"},
+			"X-Codex-Turn-Metadata": []string{`{"session_id":"rt-child-parent"}`},
+		},
+		Metadata: map[string]any{
+			cliproxyexecutor.SessionAffinityProviderMetadataKey: "mixed",
+			cliproxyexecutor.SessionAffinityModelMetadataKey:    model,
+		},
+	}
+	parent := []*Auth{{ID: "rt-auth-a", Provider: providerA}}
+	if _, errPick := selector.Pick(context.Background(), "mixed", model, parentOpts, parent); errPick != nil {
+		t.Fatalf("parent Pick: %v", errPick)
+	}
+
+	// The child is a new session whose parent is that session. The parent's
+	// credential serves it, and the child gets a binding of its own.
+	childOpts := cliproxyexecutor.Options{
+		Headers: http.Header{
+			"Content-Type": []string{"application/json"},
+			"X-Codex-Turn-Metadata": []string{
+				`{"session_id":"rt-child-parent","thread_id":"rt-child-thread","agent_name":"child","parent_thread_id":"rt-child-parent","subagent_kind":"thread_spawn"}`,
+			},
+		},
+		Metadata: map[string]any{
+			cliproxyexecutor.SessionAffinityProviderMetadataKey: "mixed",
+			cliproxyexecutor.SessionAffinityModelMetadataKey:    model,
+		},
+	}
+	child := []*Auth{{ID: "rt-auth-a", Provider: providerA}}
+	picked, errPick := selector.Pick(context.Background(), "mixed", model, childOpts, child)
+	if errPick != nil {
+		t.Fatalf("child Pick: %v", errPick)
+	}
+	if picked == nil || picked.ID != "rt-auth-a" {
+		t.Fatalf("picked = %+v, want rt-auth-a", picked)
+	}
+
+	events := routingTransitionEvents(recorder, model)
+	if len(events) != 2 {
+		t.Fatalf("events = %d, want 2: %+v", len(events), events)
+	}
+	last := events[len(events)-1]
+	if last.Transition != RoutingTransitionBindingCreated {
+		t.Fatalf("the child's first binding = %q, want %q: %+v", last.Transition, RoutingTransitionBindingCreated, last)
+	}
+}
+
 // TestRoutingTransitionChildRetryFindsItsOwnAttribution asserts that a child's
 // retry finds the child's own failure record.
 //
