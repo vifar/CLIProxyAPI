@@ -429,6 +429,7 @@ func (s *Service) startModelCatalogUpdaters(ctx context.Context) {
 	}
 	executor.StartXAIVersionUpdater(ctx, proxyURL)
 	s.startCompatCatalogUpdater(ctx)
+	s.startRoutingTransitionRecorder()
 }
 
 // startCompatCatalogUpdater starts the live model list refresh for the configured
@@ -452,4 +453,10 @@ func (s *Service) startCompatCatalogUpdater(ctx context.Context) {
 	go func() {
 		manager.Refresh(ctx)
 	}()
+}
+
+// startRoutingTransitionRecorder installs the process-wide routing transition
+// recorder, so the routing decisions are observable through the management API.
+func (s *Service) startRoutingTransitionRecorder() {
+	coreauth.SetRoutingTransitionRecorder(coreauth.NewRoutingTransitionRecorder(coreauth.RoutingTransitionEventLimit))
 }

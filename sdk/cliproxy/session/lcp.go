@@ -1723,6 +1723,38 @@ func sequenceKey(fingerprints []string) string {
 	return keys[len(keys)-1]
 }
 
+// SequenceIdentity returns a stable identifier for a request sequence.
+//
+// The identifier is derived from the sequence's fingerprints, so it is the same
+// for the selection that binds a sequence and for the result handling that
+// removes it. The session identifier is not: it is derived from the longest
+// prefix, so it changes as the conversation grows, and a fork's session
+// identifier is derived from a different prefix than its ancestor's.
+func SequenceIdentity(fingerprints []string) string {
+	return sequenceKey(fingerprints)
+}
+
+// SequenceIdentityFor returns the identity of a request sequence as the matcher
+// addresses it.
+//
+// The matcher truncates a long sequence to its configured turn limit before it
+// binds, matches and removes it. The identity of a failure record has to be
+// derived the same way, or the record of a long conversation could never be
+// found by the conversation that continues it.
+func (m *MerklePrefixMatcher) SequenceIdentityFor(fingerprints []string) string {
+	if m == nil {
+		return SequenceIdentity(fingerprints)
+	}
+	maxTurns := m.maxTurns
+	if maxTurns <= 0 {
+		maxTurns = defaultMatcherMaxTurns
+	}
+	if len(fingerprints) > maxTurns {
+		fingerprints = fingerprints[:maxTurns]
+	}
+	return SequenceIdentity(fingerprints)
+}
+
 func newLCPSessionID(namespace, firstPrefix string) string {
 	sum := sha256.Sum256([]byte("cli-proxy-api:lcp-session:v1\x00" + namespace + "\x00" + firstPrefix))
 	return "lcp:v1:" + hex.EncodeToString(sum[:])

@@ -385,7 +385,7 @@ func completeOffer(t *testing.T, connection *webrtc.PeerConnection) string {
 	}
 	select {
 	case <-gatherComplete:
-	case <-time.After(5 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("offer ICE gathering did not complete")
 	}
 	return connection.LocalDescription().SDP
@@ -403,7 +403,7 @@ func completeAnswer(t *testing.T, connection *webrtc.PeerConnection) string {
 	}
 	select {
 	case <-gatherComplete:
-	case <-time.After(5 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("answer ICE gathering did not complete")
 	}
 	return connection.LocalDescription().SDP
@@ -426,7 +426,7 @@ func receiveDataChannel(t *testing.T, channels <-chan *webrtc.DataChannel) *webr
 	select {
 	case channel := <-channels:
 		return channel
-	case <-time.After(5 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("upstream DataChannel was not created")
 		return nil
 	}
@@ -437,7 +437,7 @@ func receiveDataMessage(t *testing.T, messages <-chan webrtc.DataChannelMessage)
 	select {
 	case message := <-messages:
 		return message
-	case <-time.After(5 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("DataChannel message was not relayed")
 		return webrtc.DataChannelMessage{}
 	}

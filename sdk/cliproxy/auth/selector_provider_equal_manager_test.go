@@ -90,7 +90,7 @@ func TestSessionAffinityKeepsAWeightedFallback(t *testing.T) {
 	})
 	t.Cleanup(affinity.Stop)
 
-	mixed := newMixedSelectorFor(affinity)
+	mixed := newMixedSelectorFor(affinity, nil)
 	typed, ok := mixed.(*SessionAffinitySelector)
 	if !ok {
 		t.Fatalf("mixed selector = %T, want the affinity selector", mixed)
@@ -111,7 +111,7 @@ func TestSessionAffinityKeepsAFillFirstFallback(t *testing.T) {
 	})
 	t.Cleanup(affinity.Stop)
 
-	mixed := newMixedSelectorFor(affinity)
+	mixed := newMixedSelectorFor(affinity, nil)
 	typed, ok := mixed.(*SessionAffinitySelector)
 	if !ok {
 		t.Fatalf("mixed selector = %T, want the affinity selector", mixed)

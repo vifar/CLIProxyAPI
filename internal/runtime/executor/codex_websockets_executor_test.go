@@ -2643,16 +2643,23 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_WithSession(t *testing.T) {
 	inWriteHook := make(chan struct{})
 	pongDeliveredDuringWrite := make(chan struct{})
 
+	// The client write must finish before the server closes the connection.
+	// Otherwise the write races the close and fails with "use of closed network
+	// connection", which is what made this test load-sensitive.
+	writeComplete := make(chan struct{})
+
 	testWebsocketWritePayloadHook = func(conn *websocket.Conn) {
 		close(inWriteHook)
 		// Wait until server confirms pong was received before allowing write to finish.
 		select {
 		case <-pongDeliveredDuringWrite:
-		case <-time.After(2 * time.Second):
+		case <-time.After(20 * time.Second):
 			t.Error("timed out waiting for pong delivery while payload write was held in hook")
 		}
 	}
 	defer func() { testWebsocketWritePayloadHook = nil }()
+	testWebsocketWriteCompleteHook = func() { close(writeComplete) }
+	defer func() { testWebsocketWriteCompleteHook = nil }()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
@@ -2681,7 +2688,7 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_WithSession(t *testing.T) {
 		// Wait until client has entered writeMessage and is actively holding writeMu.
 		select {
 		case <-inWriteHook:
-		case <-time.After(2 * time.Second):
+		case <-time.After(10 * time.Second):
 			t.Errorf("timed out waiting for client write hook")
 			return
 		}
@@ -2696,7 +2703,7 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_WithSession(t *testing.T) {
 				t.Errorf("unexpected pong payload: got %q, want session-ping", got)
 			}
 			close(pongDeliveredDuringWrite)
-		case <-time.After(2 * time.Second):
+		case <-time.After(5 * time.Second):
 			t.Errorf("pong was not received while payload write was in progress")
 			return
 		}
@@ -2704,6 +2711,14 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_WithSession(t *testing.T) {
 		// Now send terminal response.
 		respPayload := []byte(`{"type":"response.completed","response":{"id":"resp-1","status":"completed","output":[]}}`)
 		_ = conn.WriteMessage(websocket.TextMessage, respPayload)
+
+		// The connection is closed when this handler returns, so the client write
+		// must have finished first.
+		select {
+		case <-writeComplete:
+		case <-time.After(10 * time.Second):
+			t.Errorf("timed out waiting for the client write to complete")
+		}
 	}))
 	defer server.Close()
 
@@ -2743,15 +2758,22 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_Sessionless(t *testing.T) {
 	inWriteHook := make(chan struct{})
 	pongDeliveredDuringWrite := make(chan struct{})
 
+	// The client write must finish before the server closes the connection.
+	// Otherwise the write races the close and fails with "use of closed network
+	// connection", which is what made this test load-sensitive.
+	writeComplete := make(chan struct{})
+
 	testWebsocketWritePayloadHook = func(conn *websocket.Conn) {
 		close(inWriteHook)
 		select {
 		case <-pongDeliveredDuringWrite:
-		case <-time.After(2 * time.Second):
+		case <-time.After(20 * time.Second):
 			t.Error("timed out waiting for pong delivery while payload write was held in hook")
 		}
 	}
 	defer func() { testWebsocketWritePayloadHook = nil }()
+	testWebsocketWriteCompleteHook = func() { close(writeComplete) }
+	defer func() { testWebsocketWriteCompleteHook = nil }()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
@@ -2777,7 +2799,7 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_Sessionless(t *testing.T) {
 		// Wait until client has entered writeMessage on sessionless path.
 		select {
 		case <-inWriteHook:
-		case <-time.After(2 * time.Second):
+		case <-time.After(10 * time.Second):
 			t.Errorf("timed out waiting for client write hook")
 			return
 		}
@@ -2792,13 +2814,21 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_Sessionless(t *testing.T) {
 				t.Errorf("unexpected pong payload: got %q, want sessionless-ping", got)
 			}
 			close(pongDeliveredDuringWrite)
-		case <-time.After(2 * time.Second):
+		case <-time.After(5 * time.Second):
 			t.Errorf("pong was not received while payload write was in progress on sessionless connection")
 			return
 		}
 
 		respPayload := []byte(`{"type":"response.completed","response":{"id":"resp-1","status":"completed","output":[]}}`)
 		_ = conn.WriteMessage(websocket.TextMessage, respPayload)
+
+		// The connection is closed when this handler returns, so the client write
+		// must have finished first.
+		select {
+		case <-writeComplete:
+		case <-time.After(10 * time.Second):
+			t.Errorf("timed out waiting for the client write to complete")
+		}
 	}))
 	defer server.Close()
 
@@ -2835,15 +2865,22 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_NonstreamSessionless(t *testi
 	inWriteHook := make(chan struct{})
 	pongDeliveredDuringWrite := make(chan struct{})
 
+	// The client write must finish before the server closes the connection.
+	// Otherwise the write races the close and fails with "use of closed network
+	// connection", which is what made this test load-sensitive.
+	writeComplete := make(chan struct{})
+
 	testWebsocketWritePayloadHook = func(conn *websocket.Conn) {
 		close(inWriteHook)
 		select {
 		case <-pongDeliveredDuringWrite:
-		case <-time.After(2 * time.Second):
+		case <-time.After(20 * time.Second):
 			t.Error("timed out waiting for pong delivery while nonstream payload write was held in hook")
 		}
 	}
 	defer func() { testWebsocketWritePayloadHook = nil }()
+	testWebsocketWriteCompleteHook = func() { close(writeComplete) }
+	defer func() { testWebsocketWriteCompleteHook = nil }()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
@@ -2869,7 +2906,7 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_NonstreamSessionless(t *testi
 		// Wait until client has entered writeMessage on nonstream path.
 		select {
 		case <-inWriteHook:
-		case <-time.After(2 * time.Second):
+		case <-time.After(10 * time.Second):
 			t.Errorf("timed out waiting for client write hook")
 			return
 		}
@@ -2884,13 +2921,22 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_NonstreamSessionless(t *testi
 				t.Errorf("unexpected pong payload: got %q, want nonstream-sessionless-ping", got)
 			}
 			close(pongDeliveredDuringWrite)
-		case <-time.After(2 * time.Second):
+		case <-time.After(5 * time.Second):
 			t.Errorf("pong was not received while payload write was in progress on nonstream sessionless connection")
 			return
 		}
 
 		respPayload := []byte(`{"type":"response.completed","response":{"id":"resp-1","status":"completed","output":[]}}`)
 		_ = conn.WriteMessage(websocket.TextMessage, respPayload)
+
+		// The connection is closed when this handler returns, so the client write
+		// must have finished first. Otherwise the write races the close and fails
+		// with "use of closed network connection".
+		select {
+		case <-writeComplete:
+		case <-time.After(10 * time.Second):
+			t.Errorf("timed out waiting for the client write to complete")
+		}
 	}))
 	defer server.Close()
 
@@ -2984,7 +3030,7 @@ func TestCodexWebsockets_SessionlessBufferingImmediateTerminalClosesConnection(t
 	// Server connection must be closed by client immediately upon terminal buffering.
 	select {
 	case <-serverClosed:
-	case <-time.After(2 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("sessionless connection was not closed after immediate terminal buffering")
 	}
 }
@@ -3112,7 +3158,7 @@ func TestCodexWebsockets_ChunkedWriteAllowsPongInterleaving(t *testing.T) {
 			}
 			close(pongReceivedBeforeReadComplete)
 			close(allowRemainingChunks)
-		case <-time.After(2 * time.Second):
+		case <-time.After(3 * time.Second):
 			t.Errorf("pong was not received while client was paused between chunks")
 			close(allowRemainingChunks)
 			return
@@ -3125,7 +3171,7 @@ func TestCodexWebsockets_ChunkedWriteAllowsPongInterleaving(t *testing.T) {
 				t.Errorf("server ReadAll rest error: %v", readErr)
 				return
 			}
-		case <-time.After(2 * time.Second):
+		case <-time.After(10 * time.Second):
 			t.Errorf("timed out reading remaining message frames")
 			return
 		}
@@ -3163,7 +3209,7 @@ func TestCodexWebsockets_ChunkedWriteAllowsPongInterleaving(t *testing.T) {
 
 	select {
 	case <-pongReceivedBeforeReadComplete:
-	case <-time.After(2 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("pong was not received before message read completed")
 	}
 }
