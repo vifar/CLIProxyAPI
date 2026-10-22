@@ -1919,6 +1919,7 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 	var lcpMatchFound bool
 	var lcpHitAuth *Auth
 	var lcpHitFailedProvider string
+	var lcpHitBindRes cliproxysession.MerklePrefixBindResult
 	s.withAffinityState(func(state *sessionAffinityState) {
 		match, ok := s.matcher.MatchFingerprintsWithContext(namespace, fingerprints, tailFingerprints, envDigest, minPrefixLength)
 		if !ok {
@@ -1936,6 +1937,18 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 			// retained failure decides the transition, so the retry is not
 			// reported as a plain hit.
 			lcpHitFailedProvider = s.takeFailedBindingLocked(state, lcpFailedBindingKey(namespace, cliproxysession.SequenceIdentity(fingerprints)))
+			if match.IsFork {
+				// A fork has a binding of its own. The matched parent supplies
+				// the credential, but the fork's sequence is bound separately,
+				// so a failure of that credential is attributed to the fork and
+				// the parent's binding is preserved.
+				//
+				// Without it the fork has no binding to fail: the result
+				// handling finds no sequence to remove, publishes no
+				// attribution, and the retry is reported as another creation
+				// rather than as the replacement it is.
+				lcpHitBindRes = s.matcher.BindFingerprintsWithContext(namespace, fingerprints, tailFingerprints, envDigest, minPrefixLength, auth.ID)
+			}
 			// The bound provider is remembered, so a later replacement of this
 			// binding can be told apart from a replacement in another provider even
 			// after the bound credential has left the available candidates.
@@ -1963,6 +1976,12 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 				opts.Metadata[cliproxyexecutor.LCPAccessGenerationMetadataKey] = match.AccessNumber
 			}
 			if match.IsFork {
+				if lcpHitBindRes.AccessNumber > 0 && opts.Metadata != nil {
+					// The fork's own access generation is published, so the
+					// result handling addresses the fork's binding and not the
+					// parent's.
+					opts.Metadata[cliproxyexecutor.LCPAccessGenerationMetadataKey] = lcpHitBindRes.AccessNumber
+				}
 				if opts.Metadata != nil {
 					opts.Metadata[cliproxyexecutor.IsForkMetadataKey] = true
 					delete(opts.Metadata, cliproxyexecutor.IsCompactionMetadataKey)
