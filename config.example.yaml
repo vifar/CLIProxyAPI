@@ -895,7 +895,7 @@ upstream:
 #           proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
 #           # proxy-url: "direct" # optional: explicit direct connect for this credential
 #         - api-key: "sk-or-v1-...b781" # without proxy-url
-#       models: # The models supported by the provider.
+#       models: # Configured model pins; see docs/compatible-providers.md for live discovery.
 #         - name: "moonshotai/kimi-k2:free" # The actual model name.
 #           alias: "kimi-k2"               # The alias used in the API.
 #           display-name: "Kimi K2"         # optional catalog display name
