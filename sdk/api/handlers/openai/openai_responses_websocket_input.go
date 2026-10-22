@@ -22,9 +22,12 @@ import (
 // responsesLocalInterrupt cancels an in-flight HTTP turn. A websocket upstream
 // does not use it; that interrupt is written to the existing socket instead.
 type responsesLocalInterrupt struct {
-	mu     sync.Mutex
+	mu sync.Mutex
+	// active is cleared before forwarding a terminal event or on cleanup.
 	active bool
-	frames chan []byte
+	// activeResponseID is supplied by response.created; see deliver for matching rules.
+	activeResponseID string
+	frames           chan []byte
 }
 
 func newResponsesLocalInterrupt() *responsesLocalInterrupt {
@@ -37,6 +40,22 @@ func (s *responsesLocalInterrupt) begin() {
 	}
 	s.mu.Lock()
 	s.active = true
+	// A new turn starts without a response: the response is known when it is
+	// created.
+	s.activeResponseID = ""
+	s.mu.Unlock()
+}
+
+func (s *responsesLocalInterrupt) setResponseID(responseID string) {
+	if s == nil {
+		return
+	}
+	responseID = strings.TrimSpace(responseID)
+	if responseID == "" {
+		return
+	}
+	s.mu.Lock()
+	s.activeResponseID = responseID
 	s.mu.Unlock()
 }
 
@@ -46,6 +65,7 @@ func (s *responsesLocalInterrupt) end() {
 	}
 	s.mu.Lock()
 	s.active = false
+	s.activeResponseID = ""
 	select {
 	case <-s.frames:
 	default:
@@ -53,6 +73,11 @@ func (s *responsesLocalInterrupt) end() {
 	s.mu.Unlock()
 }
 
+// deliver accepts interrupts only while the turn is active. Once response.created
+// supplies an ID, an interrupt naming another response is rejected so it cannot
+// cancel the current response on behalf of a completed one. Before creation,
+// turn-level interruption remains allowed without matching an ID; see
+// TestResponsesLocalInterruptOnlyReachesTheActiveResponse.
 func (s *responsesLocalInterrupt) deliver(payload []byte) bool {
 	if s == nil {
 		return false
@@ -62,11 +87,19 @@ func (s *responsesLocalInterrupt) deliver(payload []byte) bool {
 	if !s.active {
 		return false
 	}
+	if interruptID := responsesInterruptResponseID(payload); interruptID != "" && s.activeResponseID != "" && interruptID != s.activeResponseID {
+		return false
+	}
 	select {
 	case s.frames <- bytes.Clone(payload):
 	default:
 	}
 	return true
+}
+
+// responsesInterruptResponseID returns the response an interrupt names.
+func responsesInterruptResponseID(payload []byte) string {
+	return strings.TrimSpace(gjson.GetBytes(payload, "response_id").String())
 }
 
 func (s *responsesLocalInterrupt) framesChan() <-chan []byte {
