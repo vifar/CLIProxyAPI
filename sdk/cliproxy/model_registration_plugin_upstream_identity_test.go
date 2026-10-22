@@ -203,3 +203,27 @@ func TestPluginStaticModelsForProviderFollowUpstreamIdentityExclusions(t *testin
 		})
 	}
 }
+
+// TestApplyExcludedModelsKeepsTheNativeBehaviour asserts that the shared
+// exclusion helper keeps the behaviour a native provider has always had.
+//
+// The suffix-aware matching belongs to the compatible providers: the executor
+// strips a thinking suffix before it sends the request upstream, so an
+// exclusion written for the upstream name has to match the model without the
+// suffix. A native provider's exclusion has never matched that way, and the
+// compatible-provider work does not change it.
+func TestApplyExcludedModelsKeepsTheNativeBehaviour(t *testing.T) {
+	models := []*ModelInfo{{ID: "model-a"}, {ID: "model-a(high)"}, {ID: "model-b"}}
+
+	filtered := applyExcludedModels(models, []string{"model-a"})
+	present := make(map[string]bool, len(filtered))
+	for _, model := range filtered {
+		present[model.ID] = true
+	}
+	if present["model-a"] {
+		t.Fatalf("the excluded model was published: %v", present)
+	}
+	if !present["model-a(high)"] {
+		t.Fatalf("the native provider's own behaviour changed: %v", present)
+	}
+}

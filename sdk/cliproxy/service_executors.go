@@ -536,7 +536,14 @@ func (s *Service) appendPluginModels(providerKey string, models []*ModelInfo, ex
 // identity, so an exclusion for the upstream is honoured even when the plugin
 // published the model under a configured alias.
 func (s *Service) appendPluginModelsForProvider(providerKey string, models []*ModelInfo, excluded []string, entry *config.OpenAICompatibility) []*ModelInfo {
-	pluginModels := applyCompatExcludedModels(s.pluginModelsForProvider(providerKey), excluded, entry)
+	pluginModels := s.pluginModelsForProvider(providerKey)
+	if entry != nil {
+		// A compatible provider's exclusion is matched against the identity the
+		// upstream sees, so an exclusion for the upstream is honoured even when
+		// the plugin published the model under a configured alias. A native
+		// provider keeps the shared matching, which is its own behaviour.
+		pluginModels = applyCompatExcludedModels(pluginModels, excluded, entry)
+	}
 	pluginModels = applyExcludedModels(pluginModels, excluded)
 	if len(pluginModels) == 0 {
 		return models
@@ -696,7 +703,9 @@ func (s *Service) tryRegisterPluginModelsForAuthWithProviderExclusions(ctx conte
 	// entry resolves a plugin model's upstream identity, so an exclusion for
 	// the upstream is honoured even when the plugin published the model under a
 	// configured alias.
-	models = applyCompatExcludedModels(models, providerExcluded, compatEntry)
+	if compatEntry != nil {
+		models = applyCompatExcludedModels(models, providerExcluded, compatEntry)
+	}
 	models = applyExcludedModels(models, providerExcluded)
 	models = applyOAuthModelAliasForAuth(cfg, providerKey, activeAuthKind, activeAuth.Attributes, models)
 	publicationFence := fence

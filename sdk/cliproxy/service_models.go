@@ -743,15 +743,31 @@ func applyCompatExcludedModels(models []*ModelInfo, excluded []string, entry *co
 		if model == nil {
 			continue
 		}
+		blocked := false
 		id := strings.ToLower(strings.TrimSpace(model.ID))
 		upstream := id
 		if mapped, ok := upstreams[id]; ok {
 			upstream = mapped
 		}
-		if config.CompatCatalogModelExcluded(upstream, excluded) {
-			continue
+		// The executor strips a thinking suffix before sending the request
+		// upstream, so the identity that reaches the provider is the name
+		// without it. An exclusion written for that identity must match too,
+		// or an excluded model is still served.
+		//
+		// This matching belongs to the compatible providers: the shared
+		// exclusion of a native provider keeps its own behaviour.
+		for _, identity := range []string{
+			upstream,
+			compatCatalogUpstreamIdentity(upstream),
+			id,
+			compatCatalogUpstreamIdentity(id),
+		} {
+			if config.CompatCatalogModelExcluded(identity, excluded) {
+				blocked = true
+				break
+			}
 		}
-		if config.CompatCatalogModelExcluded(id, excluded) {
+		if blocked {
 			continue
 		}
 		filtered = append(filtered, model)
@@ -780,18 +796,9 @@ func applyExcludedModels(models []*ModelInfo, excluded []string) []*ModelInfo {
 			continue
 		}
 		modelID := strings.ToLower(strings.TrimSpace(model.ID))
-		// The executor strips a thinking suffix before sending the request
-		// upstream, so the identity that reaches the provider is the name
-		// without it. An exclusion written for that identity must match too,
-		// or an excluded model is still served.
-		upstreamID := strings.ToLower(strings.TrimSpace(compatCatalogUpstreamIdentity(modelID)))
 		blocked := false
 		for _, pattern := range patterns {
 			if matchWildcard(pattern, modelID) {
-				blocked = true
-				break
-			}
-			if upstreamID != modelID && matchWildcard(pattern, upstreamID) {
 				blocked = true
 				break
 			}
