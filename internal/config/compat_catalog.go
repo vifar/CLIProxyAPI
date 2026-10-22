@@ -272,8 +272,6 @@ func MergeCompatCatalogModels(configured []OpenAICompatibilityModel, live []Comp
 //
 // A pattern is an exact model ID, a prefix wildcard such as "gemini-2.5-*", a
 // suffix wildcard such as "*-preview", or a substring wildcard such as "*flash*".
-// CompatCatalogModelExcluded reports whether a model ID matches one of the
-// provider's exclusion patterns.
 //
 // The model name is matched both as written and with a thinking suffix removed.
 // A client may ask for a model with a suffix such as "(high)", and the executor

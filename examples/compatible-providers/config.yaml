@@ -1,19 +1,10 @@
 # Static fallback configuration for the compatible providers.
 #
-# This file is the offline floor for the providers whose live model list the proxy
-# can read (Ollama Cloud, OpenRouter, Vercel AI Gateway). With no network, or when
-# a provider's endpoint cannot be read, the proxy serves exactly the models listed
-# here. When a live list arrives, the proxy adds the models this file does not
-# mention and never removes a model listed here.
+# See docs/compatible-providers.md for live discovery, fallback and exclusion rules.
 #
 # Copy this file to your own config.yaml and edit it. It carries no credentials:
 # add the API keys for the providers you actually use.
 #
-# Provider endpoints:
-#   ollama-cloud   https://ollama.com/v1
-#   openrouter     https://openrouter.ai/api/v1
-#   vercel         https://ai-gateway.vercel.sh/v1
-
 port: 8318
 
 host: 127.0.0.1
@@ -46,8 +37,7 @@ remote-management:
   secret-key: ""
 
 openai-compatibility:
-  # Ollama Cloud. Its live model list is read from https://ollama.com/v1/models and
-  # needs an API key.
+  # Ollama Cloud.
   - name: ollama-cloud
     base-url: https://ollama.com/v1
     api-key-entries:
@@ -72,9 +62,7 @@ openai-compatibility:
       - name: minimax-m3
         alias: minimax-m3
 
-  # OpenRouter. Its live model list is read from https://openrouter.ai/api/v1/models
-  # and is public, so no key is needed to read the list, but a key is needed to
-  # route requests.
+  # OpenRouter.
   - name: openrouter
     base-url: https://openrouter.ai/api/v1
     api-key-entries:
@@ -97,8 +85,7 @@ openai-compatibility:
       - name: qwen/qwen3-max
         alias: qwen3-max
 
-  # Vercel AI Gateway. Its live model list is read from
-  # https://ai-gateway.vercel.sh/v1/models and is public.
+  # Vercel AI Gateway.
   - name: vercel
     base-url: https://ai-gateway.vercel.sh/v1
     api-key-entries:

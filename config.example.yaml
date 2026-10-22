@@ -919,25 +919,16 @@ upstream:
 #         - name: "kimi-k2.5"
 #           alias: "claude-opus-4.66"
 #
-#       # Models this provider must not serve. The value may be an exact model ID,
+#       # Exclude upstream model IDs, including configured pins. Use an exact ID,
 #       # a prefix wildcard ("gemini-2.5-*"), a suffix wildcard ("*-preview"), or a
-#       # substring wildcard ("*flash*"). An excluded model is also kept out of the
-#       # provider's live model list, so it does not come back from the provider.
+#       # substring wildcard ("*flash*"). See docs/compatible-providers.md for
+#       # alias matching and live discovery rules.
 #       excluded-models:
 #         - "some-model-to-hide"
 #         - "*-preview"
 
-#       # Live model list.
-#       # For a provider with a supported live model list, the proxy also reads the
-#       # provider's own model list and adds the models the configuration does not
-#       # mention. The models written above are never removed, and a model listed in
-#       # excluded-models is never added. The refresh runs in the background, so the
-#       # proxy starts with the configured list and never waits for the provider.
-#       # Supported providers and their live model list endpoints:
-#       #   ollama-cloud         https://ollama.com/v1/models          (needs an API key)
-#       #   openrouter           https://openrouter.ai/api/v1/models
-#       #   vercel               https://ai-gateway.vercel.sh/v1/models
-#       # A provider whose base-url is not one of these is never queried.
+#       # Live discovery: supported providers, refresh and merge behavior are
+#       # documented in docs/compatible-providers.md.
 
 # END API KEY EXAMPLES
 
