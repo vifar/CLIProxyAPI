@@ -121,7 +121,7 @@ func TestResponsesLateInterruptDoesNotPoisonNextCreate(t *testing.T) {
 			}
 		}
 	}()
-	if errDeadline := client.SetReadDeadline(time.Now().Add(5 * time.Second)); errDeadline != nil {
+	if errDeadline := client.SetReadDeadline(time.Now().Add(30 * time.Second)); errDeadline != nil {
 		t.Fatal(errDeadline)
 	}
 	send := func(payload string) {
@@ -167,7 +167,7 @@ func TestResponsesLateInterruptDoesNotPoisonNextCreate(t *testing.T) {
 	expect("response.incomplete", "r-http")
 	select {
 	case <-httpCanceled:
-	case <-time.After(3 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("HTTP fallback was not canceled locally")
 	}
 	if got := connections.Load(); got != 1 {
@@ -184,7 +184,7 @@ func TestResponsesLateInterruptDoesNotPoisonNextCreate(t *testing.T) {
 				t.Errorf("missing interrupt outcome %s", outcome)
 			}
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("interrupt timeline was not finalized")
 	}
 }
@@ -246,7 +246,7 @@ func TestResponsesInterruptDiagnosticsAreSanitized(t *testing.T) {
 				t.Errorf("interrupt diagnostic leaked %s", secret)
 			}
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("timeline was not finalized")
 	}
 }

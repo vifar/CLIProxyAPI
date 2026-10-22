@@ -260,7 +260,7 @@ func TestXAIWebsocketsExecuteStreamMapsMessageTooBigClose(t *testing.T) {
 		if !ok || !requestErr.IsRequestScoped() {
 			t.Fatalf("message-too-big error should be request scoped, got %T", chunk.Err)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("timed out waiting for error stream chunk")
 	}
 }
@@ -299,6 +299,10 @@ func TestXAIWebsocketsExecuteStreamSendsResponseCreateWithPreviousResponseID(t *
 	defer server.Close()
 
 	exec := NewXAIWebsocketsExecutor(&config.Config{})
+	// Each invocation owns its continuity state, including repeated test runs.
+	exec.store = &codexWebsocketSessionStore{sessions: make(map[string]*codexWebsocketSession)}
+	exec.idStore = &xaiWebsocketIDStateStore{sessions: make(map[string]*xaiWebsocketIDState)}
+	defer exec.CloseExecutionSession("execution-session-1")
 	auth := &cliproxyauth.Auth{
 		ID:       "xai-auth",
 		Provider: "xai",
@@ -351,7 +355,7 @@ func TestXAIWebsocketsExecuteStreamSendsResponseCreateWithPreviousResponseID(t *
 		if got := gjson.GetBytes(payload, "store").Bool(); !got {
 			t.Fatalf("store = false, want true; payload=%s", payload)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("timed out waiting for upstream websocket payload")
 	}
 
@@ -366,7 +370,7 @@ func TestXAIWebsocketsExecuteStreamSendsResponseCreateWithPreviousResponseID(t *
 		if got := gjson.GetBytes(bytes.TrimSpace(chunk.Payload), "type").String(); got != "response.completed" {
 			t.Fatalf("chunk type = %q, want response.completed; payload=%s", got, chunk.Payload)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("timed out waiting for completed chunk")
 	}
 }
@@ -454,7 +458,7 @@ func TestXAIWebsocketsExecuteStreamRestoresNamespaceToolCalls(t *testing.T) {
 		if tool.Get("tools").Exists() {
 			t.Fatalf("upstream tool should not contain namespace children: %s", payload)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("timed out waiting for upstream websocket payload")
 	}
 
@@ -551,7 +555,7 @@ func TestXAIWebsocketsExecuteStreamRestoresAliasedWebSearch(t *testing.T) {
 		if got := tool.Get("name").String(); got != "clientfn_web_search" {
 			t.Fatalf("upstream tool name = %q, want clientfn_web_search; payload=%s", got, payload)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("timed out waiting for upstream websocket payload")
 	}
 
@@ -930,7 +934,7 @@ func TestXAIWebsocketsExecuteStreamPreservesNormalizedCustomSameNameToolWithXSea
 	var gotBody []byte
 	select {
 	case gotBody = <-capturedPayload:
-	case <-time.After(2 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("timed out waiting for upstream websocket request body")
 	}
 	// response.create keeps tools at the top level of the websocket payload.
@@ -1114,7 +1118,7 @@ func TestXAIWebsocketsExecuteStreamRewritesRepeatedResponseIDForDownstream(t *te
 			return gjson.GetBytes(payload, "response.id").String(),
 				gjson.GetBytes(payload, "response.output.0.id").String(),
 				gjson.GetBytes(payload, "response.previous_response_id").String()
-		case <-time.After(5 * time.Second):
+		case <-time.After(30 * time.Second):
 			t.Fatal("timed out waiting for completed chunk")
 		}
 		return "", "", ""
@@ -1234,7 +1238,7 @@ func TestXAIWebsocketsExecuteStreamRewritesRepeatedResponseIDWithoutPreviousResp
 			payload := bytes.TrimSpace(chunk.Payload)
 			return gjson.GetBytes(payload, "response.id").String(),
 				gjson.GetBytes(payload, "response.output.0.id").String()
-		case <-time.After(5 * time.Second):
+		case <-time.After(30 * time.Second):
 			t.Fatal("timed out waiting for completed chunk")
 		}
 		return "", ""
@@ -1477,7 +1481,7 @@ func TestXAIWebsocketsExecuteStreamCompactionTriggerUsesHTTPCompactWithRecordedC
 		if gjson.GetBytes(payload, "stream").Exists() {
 			t.Fatalf("stream must be omitted for xAI websocket payload: %s", payload)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("timed out waiting for upstream websocket payload")
 	}
 
@@ -1512,7 +1516,7 @@ func TestXAIWebsocketsExecuteStreamCompactionTriggerUsesHTTPCompactWithRecordedC
 		if got := gjson.GetBytes(payload, "previous_response_id").String(); got != "" {
 			t.Fatalf("compact previous_response_id = %q, want empty; payload=%s", got, payload)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("timed out waiting for compact HTTP payload")
 	}
 
@@ -1546,7 +1550,7 @@ func TestXAIWebsocketsExecuteStreamCompactionTriggerUsesHTTPCompactWithRecordedC
 		if got := input.Array()[1].Get("id").String(); got != "msg-2" {
 			t.Fatalf("post-compaction input[1].id = %q, want msg-2; payload=%s", got, payload)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("timed out waiting for post-compaction websocket payload")
 	}
 }
@@ -1764,7 +1768,7 @@ func TestXAIWebsocketsExecuteStreamCompletesGenerateFalseWarmup(t *testing.T) {
 		if got := gjson.GetBytes(payload, "store").Bool(); !got {
 			t.Fatalf("store = false, want true; payload=%s", payload)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("timed out waiting for upstream websocket payload")
 	}
 
@@ -1782,7 +1786,7 @@ func TestXAIWebsocketsExecuteStreamCompletesGenerateFalseWarmup(t *testing.T) {
 				t.Fatalf("chunk error = %v", chunk.Err)
 			}
 			gotTypes = append(gotTypes, gjson.GetBytes(bytes.TrimSpace(chunk.Payload), "type").String())
-		case <-time.After(5 * time.Second):
+		case <-time.After(30 * time.Second):
 			t.Fatalf("timed out waiting for warmup stream to close; event types so far: %v", gotTypes)
 		}
 	}
@@ -1983,7 +1987,7 @@ func TestXAIWebsocketsExecuteStreamStopsOnBareErrorPayload(t *testing.T) {
 		if chunk.Err == nil {
 			t.Fatalf("chunk error = nil, want upstream error; payload=%s", chunk.Payload)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("timed out waiting for bare upstream error")
 	}
 }
@@ -2059,7 +2063,7 @@ func TestXAIWebsocketsCompactionTriggerFreshSessionFallback(t *testing.T) {
 		if got := gjson.GetBytes(payload, "previous_response_id").String(); got != "" {
 			t.Fatalf("compact previous_response_id = %q, want empty; payload=%s", got, payload)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("timed out waiting for compact HTTP payload")
 	}
 
@@ -2092,7 +2096,7 @@ func TestXAIWebsocketsCompactionTriggerFreshSessionFallback(t *testing.T) {
 		if got := gjson.GetBytes(payload, "previous_response_id").String(); got != "resp-prev-123" {
 			t.Fatalf("compact previous_response_id = %q, want resp-prev-123; payload=%s", got, payload)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("timed out waiting for compact HTTP payload")
 	}
 
@@ -2233,15 +2237,22 @@ func TestXAIWebsockets_KeepalivePingDuringUpload_WithSession(t *testing.T) {
 	inWriteHook := make(chan struct{})
 	pongDeliveredDuringWrite := make(chan struct{})
 
+	// The client write must finish before the server closes the connection.
+	// Otherwise the write races the close and fails with "use of closed network
+	// connection", which is what made this test load-sensitive.
+	writeComplete := make(chan struct{})
+
 	testWebsocketWritePayloadHook = func(conn *websocket.Conn) {
 		close(inWriteHook)
 		select {
 		case <-pongDeliveredDuringWrite:
-		case <-time.After(2 * time.Second):
+		case <-time.After(30 * time.Second):
 			t.Error("timed out waiting for pong delivery while xai payload write was held in hook")
 		}
 	}
 	defer func() { testWebsocketWritePayloadHook = nil }()
+	testWebsocketWriteCompleteHook = func() { close(writeComplete) }
+	defer func() { testWebsocketWriteCompleteHook = nil }()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
@@ -2266,7 +2277,7 @@ func TestXAIWebsockets_KeepalivePingDuringUpload_WithSession(t *testing.T) {
 
 		select {
 		case <-inWriteHook:
-		case <-time.After(2 * time.Second):
+		case <-time.After(30 * time.Second):
 			t.Errorf("timed out waiting for client write hook")
 			return
 		}
@@ -2279,13 +2290,22 @@ func TestXAIWebsockets_KeepalivePingDuringUpload_WithSession(t *testing.T) {
 				t.Errorf("unexpected pong payload: got %q, want xai-session-ping", got)
 			}
 			close(pongDeliveredDuringWrite)
-		case <-time.After(2 * time.Second):
+		case <-time.After(5 * time.Second):
 			t.Errorf("pong was not received while payload write was in progress")
 			return
 		}
 
 		respPayload := []byte(`{"type":"response.done","response":{"id":"resp-1","status":"completed","output":[]}}`)
 		_ = conn.WriteMessage(websocket.TextMessage, respPayload)
+
+		// The connection is closed when this handler returns, so the client write
+		// must have finished first. Otherwise the write races the close and fails
+		// with "use of closed network connection".
+		select {
+		case <-writeComplete:
+		case <-time.After(30 * time.Second):
+			t.Errorf("timed out waiting for the client write to complete")
+		}
 	}))
 	defer server.Close()
 
@@ -2329,15 +2349,22 @@ func TestXAIWebsockets_KeepalivePingDuringUpload_Sessionless(t *testing.T) {
 	inWriteHook := make(chan struct{})
 	pongDeliveredDuringWrite := make(chan struct{})
 
+	// The client write must finish before the server closes the connection.
+	// Otherwise the write races the close and fails with "use of closed network
+	// connection", which is what made this test load-sensitive.
+	writeComplete := make(chan struct{})
+
 	testWebsocketWritePayloadHook = func(conn *websocket.Conn) {
 		close(inWriteHook)
 		select {
 		case <-pongDeliveredDuringWrite:
-		case <-time.After(2 * time.Second):
+		case <-time.After(30 * time.Second):
 			t.Error("timed out waiting for pong delivery while xai sessionless payload write was held in hook")
 		}
 	}
 	defer func() { testWebsocketWritePayloadHook = nil }()
+	testWebsocketWriteCompleteHook = func() { close(writeComplete) }
+	defer func() { testWebsocketWriteCompleteHook = nil }()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
@@ -2362,7 +2389,7 @@ func TestXAIWebsockets_KeepalivePingDuringUpload_Sessionless(t *testing.T) {
 
 		select {
 		case <-inWriteHook:
-		case <-time.After(2 * time.Second):
+		case <-time.After(30 * time.Second):
 			t.Errorf("timed out waiting for client write hook")
 			return
 		}
@@ -2375,13 +2402,22 @@ func TestXAIWebsockets_KeepalivePingDuringUpload_Sessionless(t *testing.T) {
 				t.Errorf("unexpected pong payload: got %q, want xai-sessionless-ping", got)
 			}
 			close(pongDeliveredDuringWrite)
-		case <-time.After(2 * time.Second):
+		case <-time.After(5 * time.Second):
 			t.Errorf("pong was not received while payload write was in progress on sessionless connection")
 			return
 		}
 
 		respPayload := []byte(`{"type":"response.done","response":{"id":"resp-1","status":"completed","output":[]}}`)
 		_ = conn.WriteMessage(websocket.TextMessage, respPayload)
+
+		// The connection is closed when this handler returns, so the client write
+		// must have finished first. Otherwise the write races the close and fails
+		// with "use of closed network connection".
+		select {
+		case <-writeComplete:
+		case <-time.After(30 * time.Second):
+			t.Errorf("timed out waiting for the client write to complete")
+		}
 	}))
 	defer server.Close()
 

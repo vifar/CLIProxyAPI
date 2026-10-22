@@ -122,10 +122,13 @@ func TestManagerSessionAffinityMixedPoolNilMetadataPropagatesFailureCleanup(t *t
 		t.Fatalf("expected succExec called 1 time, got %d", succExec.calls.Load())
 	}
 
-	// Verify the affinity cache has auth-2 bound under the "mixed" namespace
-	cachedAuthID, ok := affinity.cache.Get("mixed::header:sess-mixed-1::" + model)
+	// Verify the affinity cache has auth-2 bound under the "mixed" namespace.
+	// The mixed namespace is scoped by the canonical eligible provider set, so the
+	// key carries that scope.
+	mixedKey := "mixed[" + p1 + "," + p2 + "]::header:sess-mixed-1::" + model
+	cachedAuthID, ok := affinity.cache.Get(mixedKey)
 	if !ok {
-		t.Fatalf("expected mixed cache key to be bound to auth-2, but not found in cache")
+		t.Fatalf("expected mixed cache key %q to be bound to auth-2, but not found in cache", mixedKey)
 	}
 	if cachedAuthID != auth2ID {
 		t.Fatalf("expected mixed cache key to be bound to %q, got %q", auth2ID, cachedAuthID)
