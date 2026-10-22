@@ -130,15 +130,22 @@ func pickRoundRobinByID(available []*Auth) *Auth {
 // fill-first fallback would switch it from credential ordering to provider
 // ordering.
 //
+// The provider-equal selector is shared between the affinity selector's fallback
+// and the mixed selection path, so both use one cursor scope and one rotation
+// state.
+//
 // The result is built once and kept for the lifetime of the configured selector.
 // Building it per request would reset the provider cursor every time, and the
 // providers would never alternate.
-func newMixedSelectorFor(selector Selector) Selector {
+func newMixedSelectorFor(selector Selector, providerEqual *ProviderEqualSelector) Selector {
+	if providerEqual == nil {
+		providerEqual = NewProviderEqualSelector()
+	}
 	switch typed := selector.(type) {
 	case *SessionAffinitySelector:
-		return typed.withProviderEqualFallback()
+		return typed.withProviderEqualFallback(providerEqual)
 	case *RoundRobinSelector:
-		return NewProviderEqualSelector()
+		return providerEqual
 	default:
 		return selector
 	}

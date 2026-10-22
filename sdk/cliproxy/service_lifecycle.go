@@ -428,4 +428,11 @@ func (s *Service) startModelCatalogUpdaters(ctx context.Context) {
 		proxyURL = cfg.ProxyURL
 	}
 	executor.StartXAIVersionUpdater(ctx, proxyURL)
+	s.startRoutingTransitionRecorder()
+}
+
+// startRoutingTransitionRecorder installs the process-wide routing transition
+// recorder, so the routing decisions are observable through the management API.
+func (s *Service) startRoutingTransitionRecorder() {
+	coreauth.SetRoutingTransitionRecorder(coreauth.NewRoutingTransitionRecorder(coreauth.RoutingTransitionEventLimit))
 }

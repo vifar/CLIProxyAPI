@@ -41,6 +41,7 @@ func (s *Server) registerManagementV8Routes() {
 	v8.GET("/observability/usage/queue", s.mgmt.GetUsageQueue)
 	v8.GET("/observability/usage/compatible-providers", s.mgmt.GetCompatProviderUsage)
 	v8.GET("/observability/usage/compatible-providers/:id", s.mgmt.GetCompatProviderUsageDetail)
+	v8.GET("/observability/routing/transitions", s.mgmt.GetRoutingTransitions)
 
 	v8.GET("/credentials", s.mgmt.ListAuthFiles)
 	v8.POST("/credentials", s.mgmt.UploadAuthFileV8)

@@ -100,6 +100,7 @@ retain the corresponding business operation's fields.
 | `/observability/usage/queue` | GET | Get queued usage events. |
 | `/observability/usage/compatible-providers` | GET | [List compatible-provider credentials](#compatible-provider-usage-meters). |
 | `/observability/usage/compatible-providers/<id>` | GET | [Read a provider usage meter](#compatible-provider-usage-meters). |
+| `/observability/routing/transitions` | GET | [Read routing transition counters and recent events](#routing-transitions). |
 | `/credentials` | GET, POST, DELETE | List, upload, or delete credential files. |
 | `/credentials/models` | GET | Get credential models. |
 | `/credentials/download` | GET | Download a credential file. |
@@ -117,6 +118,55 @@ retain the corresponding business operation's fields.
 | `/plugins/store` | GET | List the plugin store. |
 | `/plugins/store/<id>/install` | POST | Install or update a plugin. |
 | `/plugins/<id>/quota` | GET, POST, DELETE | Read, fetch, or reset plugin quota. |
+
+### Routing transitions
+
+`GET /observability/routing/transitions` returns HTTP `200` with one consistent
+snapshot containing:
+
+| Field | Meaning |
+| --- | --- |
+| `counters` | Rows with `transition`, `model`, `provider`, and `count`, grouped by those first three fields. |
+| `totals` | Counts keyed by transition; each equals the sum of its counter rows. Transitions with no recorded events are omitted. |
+| `events` | The most recent events, oldest first, up to 200 in the standard service. |
+
+Each event includes `transition` and `model`, with optional `provider`,
+`previous_provider`, and `session`. Provider values are executor provider keys.
+`previous_provider` identifies the replaced binding's provider when known.
+`session` is an opaque correlation identifier: values longer than 20 bytes are
+shortened to an eight-byte prefix, `...`, and an eight-character digest of the
+complete identifier. Credential IDs, API keys, tokens, and prompt contents are
+not included as event fields.
+
+| `transition` | Meaning |
+| --- | --- |
+| `binding_created` | A new session binding is established, including a child's or fork's first binding when it inherits a parent's credential. |
+| `binding_hit` | An existing binding is reused or preserved. |
+| `credential_reselected` | A failed or unavailable binding is replaced within the same provider. |
+| `provider_failover` | A binding is replaced with one belonging to a different provider; this does not imply all credentials in the previous provider were exhausted. |
+| `no_eligible_provider` | Mixed-provider selection returned an error. Provider and session fields are absent. |
+
+These describe binding selections, not completed requests or upstream success.
+Retries can contribute additional events. Under `session-affinity-rebind-on: quota`,
+a temporary fallback that preserves the original binding is a
+`binding_hit`; its `provider` names the preserved binding's provider, even when
+another provider serves that request. See the [routing guide](routing/provider-equal-mixed-round-robin.md#failover-and-provider-set-changes)
+for selection and rebinding policy.
+
+Binding events come from the built-in session-affinity selector, covering
+explicit identities and inferred conversation-prefix (LCP) bindings. Selections
+without a session binding do not emit binding events. Mixed-provider selection
+errors are counted independently of affinity, including scheduler, plugin, and
+Home dispatch paths; Home's local management access restriction still applies.
+
+The standard service installs a process-wide, in-memory recorder on startup.
+Counters last for that recorder's lifetime and reset on restart; there is no
+persistence or Prometheus exporter. Model and provider names are trimmed and
+limited to 128 bytes. Counter cardinality is limited to 256 distinct nonempty
+model names and 64 provider names; further names count under `<overflow>` while
+totals remain exact. Recent events retain their bounded names rather than the
+overflow labels. With no recorder installed, the endpoint returns
+`{"counters":[],"totals":{},"events":[]}`. This endpoint has no v0 equivalent.
 
 ### Compatible-provider usage meters
 

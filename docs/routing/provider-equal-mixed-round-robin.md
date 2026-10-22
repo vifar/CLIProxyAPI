@@ -24,7 +24,7 @@ Normalize and sort provider keys to give the provider ring a stable order. Reque
 
 The scheduler keys its provider cursor by the canonical resolved provider set and model, then rotates only among providers with ready credentials at the winning priority. The legacy provider-equal selector derives its provider set from the available candidates and also includes the route namespace in its key. Availability changes can therefore change the legacy cursor scope even when the resolved route stays the same.
 
-Provider and credential cursors are held in memory. The legacy mixed selector is retained by the manager for the lifetime of the configured selector, so consecutive requests advance its rotation rather than restarting it.
+Provider and credential cursors are held in memory. The manager retains the provider-equal rotation state across selector changes and shares it between legacy mixed selection and the session-affinity round-robin fallback, so consecutive selections advance the same rotation rather than restarting it.
 
 ### Credential selection
 
@@ -36,7 +36,7 @@ Credential rotation is scoped by provider and canonical model. Traffic for one p
 
 With session affinity enabled, only its round-robin fallback is replaced by provider-equal selection. Weighted and fill-first fallbacks keep their own behavior, including positive-weight filtering for weighted routing.
 
-Existing identity extraction, binding reuse, inheritance, TTL, and invalidation logic remain in place. A cold or rebound session uses the fallback to select a provider and credential. A request without a usable explicit or inferred session identity follows the fallback without storing a session binding.
+Existing identity extraction, inheritance, and TTL policies remain in place. Healthy bindings are reused within their scope. A cold or rebound session uses the fallback to select a provider and credential. A request without a usable explicit or inferred session identity follows the fallback without storing a session binding.
 
 For explicit session identities, the binding key is:
 
@@ -86,8 +86,8 @@ With two providers enabled at the same priority and exposing the same alias, ena
 4. Remove one provider from the route and confirm subsequent requests use the remaining provider without reusing the old mixed-route binding.
 5. Restore the original provider set and confirm new sessions distribute across both providers. A session may reuse its original binding if it is still live and eligible; it need not retain the credential selected while the provider was absent.
 
-Establish selected providers from existing debug logs or routing metadata, not response wording. This is a manual verification procedure, not a claim that a live smoke test has run.
+Inspect binding decisions through the [routing transition API](../management-api-v8.md#routing-transitions). Use debug logs or routing metadata for the provider that actually served a request when a binding is preserved during temporary fallback. This is a manual verification procedure, not a claim that a live smoke test has run.
 
 ## Deferred Design Work
 
-Dedicated routing-transition events or Prometheus counters are not implemented by this change. Existing session-affinity logs remain available. Same-provider-first failover is also not part of the delivered policy. These extensions would require separate changes; the regression files above do not claim to verify them.
+Same-provider-first failover and dedicated Prometheus counters remain deferred and would require separate changes. The regression files above cover provider-equal selection and provider-set-scoped affinity; they do not claim to verify these deferred extensions. Routing transition observability is documented in the [v8 Management API reference](../management-api-v8.md#routing-transitions). Existing session-affinity logs remain available.

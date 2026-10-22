@@ -99,7 +99,7 @@ func TestSessionAffinityFallbackBalancesProviders(t *testing.T) {
 	})
 	t.Cleanup(affinity.Stop)
 
-	mixed := newMixedSelectorFor(affinity)
+	mixed := newMixedSelectorFor(affinity, nil)
 
 	gotProviders := make([]string, 0, 8)
 	for i := 0; i < 8; i++ {
@@ -126,11 +126,11 @@ func TestNewMixedSelectorForLeavesOtherStrategiesAlone(t *testing.T) {
 	t.Parallel()
 
 	fillFirst := &FillFirstSelector{}
-	if got := newMixedSelectorFor(fillFirst); got != fillFirst {
+	if got := newMixedSelectorFor(fillFirst, nil); got != fillFirst {
 		t.Fatalf("fill-first was replaced: %T", got)
 	}
 	weighted := &WeightedRoundRobinSelector{}
-	if got := newMixedSelectorFor(weighted); got != weighted {
+	if got := newMixedSelectorFor(weighted, nil); got != weighted {
 		t.Fatalf("weighted round robin was replaced: %T", got)
 	}
 }

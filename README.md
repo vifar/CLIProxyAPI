@@ -211,7 +211,8 @@ models are configured in `openai-compatibility`.
 
 ## Management API
 
-see [MANAGEMENT_API.md](https://help.router-for.me/management/api)
+See the [v8 Management API reference](docs/management-api-v8.md), including routing
+transition observability, and the [legacy API guide](https://help.router-for.me/management/api).
 
 ## Usage Statistics
 

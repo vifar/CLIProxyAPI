@@ -442,7 +442,13 @@ func (m *Manager) SetSelector(selector Selector) {
 	// The mixed-provider selector is built once, here, so its rotation state
 	// survives across requests. Building it per selection would reset the
 	// provider cursor on every request and the providers would never alternate.
-	m.mixedSelector = newMixedSelectorFor(selector)
+	//
+	// The provider-equal selector is shared between the mixed selector and the
+	// affinity selector's fallback, so both address one rotation state.
+	if m.providerEqualSelector == nil {
+		m.providerEqualSelector = NewProviderEqualSelector()
+	}
+	m.mixedSelector = newMixedSelectorFor(selector, m.providerEqualSelector)
 	m.mu.Unlock()
 
 	if oldSelector != nil {
@@ -2372,11 +2378,35 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
 	opts.EnsureMetadata()
 	if m.HomeEnabled() {
-		return m.pickNextViaHome(ctx, model, opts, tried)
+		selected, executor, providerKey, errHome := m.pickNextViaHome(ctx, model, opts, tried)
+		if errHome != nil {
+			// The transition is recorded here too, so a route that cannot be
+			// served is counted the same way in Home mode as in every other
+			// mode.
+			recordRoutingTransition(ctx, RoutingTransitionEvent{
+				Transition: RoutingTransitionNoEligibleProvider,
+				Model:      model,
+			})
+		}
+		return selected, executor, providerKey, errHome
 	}
 	opts.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey] = "mixed"
 	opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = model
 
+	selected, executor, providerKey, errPick := m.pickNextMixedSelected(ctx, providers, model, opts, tried)
+	if errPick != nil {
+		// The transition is recorded once, at this shared boundary, so every
+		// routing path that cannot serve the request is counted the same way.
+		recordRoutingTransition(ctx, RoutingTransitionEvent{
+			Transition: RoutingTransitionNoEligibleProvider,
+			Model:      model,
+		})
+	}
+	return selected, executor, providerKey, errPick
+}
+
+// pickNextMixedSelected selects a credential for a mixed-provider route.
+func (m *Manager) pickNextMixedSelected(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
 	if m.hasPluginScheduler() || !m.useSchedulerFastPath() {
 		return m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
 	}
