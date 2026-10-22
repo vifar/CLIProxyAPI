@@ -36,7 +36,7 @@ Credential rotation is scoped by provider and canonical model. Traffic for one p
 
 With session affinity enabled, only its round-robin fallback is replaced by provider-equal selection. Weighted and fill-first fallbacks keep their own behavior, including positive-weight filtering for weighted routing.
 
-Existing identity extraction, binding reuse, inheritance, TTL, and invalidation logic remain in place. A cold or rebound session uses the fallback to select a provider and credential. A request without a usable session identity follows the fallback without storing a session binding.
+Existing identity extraction, binding reuse, inheritance, TTL, and invalidation logic remain in place. A cold or rebound session uses the fallback to select a provider and credential. A request without a usable explicit or inferred session identity follows the fallback without storing a session binding.
 
 For explicit session identities, the binding key is:
 
@@ -44,11 +44,11 @@ For explicit session identities, the binding key is:
 route namespace :: session identity :: canonical model -> auth ID
 ```
 
-Mixed routes use `mixed[<canonical provider set>]` as their namespace. Provider keys are normalized, deduplicated, sorted, and comma-separated, so provider order does not change the scope. The set comes from the resolved route providers, not just credentials ready at the winning priority. The auth ID identifies both provider and credential, and a cached credential is still checked against current candidates before reuse.
+Mixed routes use `mixed[<canonical provider set>]` as their namespace. Provider keys are normalized, deduplicated, sorted, then individually percent-encoded before comma-joining, so provider order does not change the scope. Encoding prevents delimiters in a provider name from changing the scope structure: a provider named `a,b` has a different scope from providers `a` and `b`. The set comes from the resolved route providers, not just credentials ready at the winning priority. The auth ID identifies both provider and credential, and a cached credential is still checked against current candidates before reuse.
 
 Changing the route's provider set creates a distinct binding scope even if the previously bound credential remains eligible. Returning to an earlier set can reuse its binding if it is still live and eligible. Single-provider routes keep their plain provider namespace. Longest-common-prefix (LCP) affinity for requests without an explicit session uses the same provider-set scope, in addition to its model and caller scope; selection, successful binding updates, and failure eviction use that same namespace.
 
-Affinity lookup observes scoped mixed bindings without selecting a credential or refreshing TTL. Because lookup accepts no provider set, explicit-session lookup considers matching session/model bindings across mixed scopes and returns `ambiguous` if they identify different credentials after any caller-supplied auth filtering.
+Affinity lookup observes scoped mixed bindings without selecting a credential or refreshing TTL. Because lookup accepts no provider set, explicit-session lookup considers matching session/model bindings across mixed scopes and returns `ambiguous` if they identify different credentials after any caller-supplied auth filtering. Lookup validates the complete namespace head before accepting a session/model suffix, rejecting cross-session matches from identifiers containing key separators. Scope syntax is recognized only for the mixed namespace; brackets in a plain provider name remain part of that name.
 
 ### Failover and provider-set changes
 
@@ -74,6 +74,7 @@ Regression coverage is split by behavior:
 - [selector_provider_equal_test.go](../../sdk/cliproxy/auth/selector_provider_equal_test.go): legacy provider equality, provider-equal affinity fallback, and preservation of other strategies.
 - [selector_provider_equal_manager_test.go](../../sdk/cliproxy/auth/selector_provider_equal_manager_test.go): manager-owned selector lifetime and preservation of weighted and fill-first affinity fallbacks.
 - [session_affinity_provider_set_test.go](../../sdk/cliproxy/auth/session_affinity_provider_set_test.go): canonical provider-set namespaces, scoped mixed bindings and lookup, rejection of cross-session lookup matches from crafted session identifiers, and consistent LCP namespace construction and parsing.
+- [provider_set_scope_encoding_test.go](../../sdk/cliproxy/auth/provider_set_scope_encoding_test.go): distinct scopes for delimiter-containing provider names, structural-character encoding, preservation of brackets in plain provider names, and stable LCP namespaces for already-scoped providers.
 
 ### Live smoke test
 
