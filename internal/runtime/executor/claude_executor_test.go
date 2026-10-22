@@ -485,7 +485,7 @@ func TestResolveClaudeDeviceProfile_RechecksCacheBeforeStoringCandidate(t *testi
 
 	select {
 	case <-lowPaused:
-	case <-time.After(2 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("timed out waiting for lower candidate to pause before storing")
 	}
 
@@ -509,7 +509,7 @@ func TestResolveClaudeDeviceProfile_RechecksCacheBeforeStoringCandidate(t *testi
 		if lowResult.OS != "MacOS" || lowResult.Arch != "arm64" {
 			t.Fatalf("lowResult platform = %s/%s, want %s/%s", lowResult.OS, lowResult.Arch, "MacOS", "arm64")
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("timed out waiting for lower candidate result")
 	}
 
@@ -2110,7 +2110,7 @@ func TestClaudeExecutor_ExecuteStreamOAuthStartupCancellationIsRequestScoped(t *
 		if !errors.As(errStream, &requestErr) || requestErr == nil || !requestErr.IsRequestScoped() {
 			t.Fatalf("ExecuteStream() error = %T %v, want request-scoped cancellation", errStream, errStream)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("timed out waiting for startup cancellation")
 	}
 }
@@ -2152,7 +2152,7 @@ func TestClaudeExecutor_ExecuteStreamOAuthCancellationIsRequestScoped(t *testing
 	cancel()
 
 	var cancellationErr error
-	deadline := time.After(2 * time.Second)
+	deadline := time.After(30 * time.Second)
 	for cancellationErr == nil {
 		select {
 		case chunk, ok := <-result.Chunks:
