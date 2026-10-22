@@ -422,6 +422,42 @@ func (c *SessionCache) CompareAndDeleteReporting(sessionID, expectedAuthID strin
 	return removed, true
 }
 
+// CompareAndDeleteGroupReporting removes the whole binding a session
+// identifier belongs to, only if it still points at the expected credential, and
+// calls report with the credential it removed and the identifiers that named
+// the binding.
+//
+// A credential failure invalidates the binding, not one of its names. Removing
+// only the named identifier would leave the binding's other names pointing at
+// the failed credential, and a retry through one of them would reuse it.
+//
+// The report is called while the cache lock is held, so the removal and the
+// attribution it publishes are one step.
+//
+// The callback must not call back into the cache.
+func (c *SessionCache) CompareAndDeleteGroupReporting(sessionID, expectedAuthID string, report func(removedAuthID string, identifiers []string)) (string, bool) {
+	if c == nil || sessionID == "" || expectedAuthID == "" {
+		return "", false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.ensureInitializedLocked()
+	entry, ok := c.entries[sessionID]
+	if !ok || entry.authID != expectedAuthID {
+		return "", false
+	}
+	removed := entry.authID
+	identifiers := append([]string(nil), entry.aliases...)
+	if len(identifiers) == 0 {
+		identifiers = []string{sessionID}
+	}
+	if report != nil {
+		report(removed, identifiers)
+	}
+	c.removeAliasGroupLocked(entry)
+	return removed, true
+}
+
 // Invalidate removes a specific session binding without allowing another alias
 // in the same group to recreate it on its next refresh.
 func (c *SessionCache) Invalidate(sessionID string) {
